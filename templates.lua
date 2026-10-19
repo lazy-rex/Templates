@@ -513,8 +513,8 @@ local function grant_key(run) return 'run/' .. run.id end
 -- the run's requests. It never creates one: that needs the agent's call. The agent is not compared:
 -- the grant's agent can be a later ID of the run's agent (an identity that took over request.by),
 -- and the plugin can identify only a caller, not an ID. The grant key run/<id> is the plugin's own
--- (the hub scopes grant keys to the plugin), and start_core creates it only in a call that
--- replays this run's operation key, which only the run's agent (any of its IDs) can do.
+-- (the hub scopes grant keys to the plugin), and start_core creates it only in the initial call
+-- or a replay with this run's operation key, which only the run's agent (any of its IDs) can make.
 local function find_grant(run)
   local g = hub('hub.grant.get', {key = grant_key(run)})
   if not g.found or g.state ~= 'active' then return nil end

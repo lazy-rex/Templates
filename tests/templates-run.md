@@ -85,7 +85,7 @@ decimal IDs without relying on floating-point integer precision. Spawn keys use
 
 `retry(id, op)` queues a blocked, pending or unknown run again. The queued state and `op` (with
 `result = {run_id, woken}`) commit in one batch, so a lost reply loses no retry. Another status
-gives `woken = false` and changes nothing. `wake_one(id)` schedules one queued or starting run
+gives `woken = false`: it keeps the run unchanged and records the operation result. `wake_one(id)` schedules one queued or starting run
 (a replayed retry). Dismiss and retry come from the user or any agent (LazyRex `decisions.md`,
 2026-10-19); the run keeps its `by` and its grant.
 
@@ -111,9 +111,9 @@ Recovery (`find_grant`). A crash between the grant and `authorize` leaves a gran
 not record. The plugin's `find_grant` accepts a grant only when all of these are true:
 
 - It is the grant with the key `run/<id>`. The hub scopes grant keys to the plugin. Only the
-  plugin's start path creates this key, and only in a call that replays this run's operation key.
-  The operation key lookup covers only the identity set (the identity and its legacy IDs) of the
-  run's agent.
+  plugin's start path creates this key, in the initial call or a replay with this run's
+  operation key. The operation key lookup covers only the identity set (the identity and its
+  legacy IDs) of the run's agent.
 - It is active.
 - Its entries equal the run's requests exactly (canonical encoding).
 
