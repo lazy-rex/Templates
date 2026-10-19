@@ -87,7 +87,8 @@ Every field that a later write adds has a bound:
 | --- | --- | --- |
 | An error text (`run.error`, a tab result's `error`) | 512 bytes, control characters replaced with spaces | Cut on a UTF-8 boundary with "…". The full text goes to the plugin log. |
 | A session ID in a start request | 1 to 128 characters of `[A-Za-z0-9.:_-]` | `invalid_input`; nothing is written. |
-| A session, window, block or grant ID from the hub | 1 to 128 characters of `[A-Za-z0-9.:_-]` | The result is invalid: the run blocks with a fixed error. |
+| A session, window or block ID from the hub | 1 to 128 characters of `[A-Za-z0-9.:_-]` | The result is invalid: the run blocks with a fixed error. |
+| A grant ID | 1 to 128 characters of `[A-Za-z0-9.:_-]` | `engine.authorize` refuses it with `invalid_input`. Recovery (`find_grant`) does not record it: the run stays authorizing and dispatches nothing. A finished run records no grant. |
 | The block IDs of a tab result | The number of leaves of the tab | The result is invalid. |
 | An operation key (agent `key`, UI operation key) | 200 bytes, no control characters | `invalid_input`; nothing is written. |
 | An agent ID (the identity and each legacy ID) | 128 bytes, no control characters | `refused`. The plugin refuses the agent if any one of its IDs is outside the bound. It does not drop an ID. |
