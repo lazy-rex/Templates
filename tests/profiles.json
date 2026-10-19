@@ -1,0 +1,5 @@
+{"profiles": [
+ {"id": "server", "name": "Server", "kind": "accessory", "command": ["/bin/sh", "-c", "echo serving on $1; exec sleep 100000", "server", "${port}"],
+  "args": [{"name": "port", "default": "3000"}]},
+ {"id": "watcher", "name": "Watcher", "kind": "accessory", "command": ["/bin/sleep", "100000"]}
+]}

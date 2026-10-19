@@ -551,11 +551,11 @@ local function render_panel()
   local items = {}
   for _, t in ipairs(templates()) do
     items[#items + 1] = {id = t.name, label = t.name, detail = #t.tabs .. ' tab' .. (#t.tabs == 1 and '' or 's'),
-      action = {name = 'delete', label = 'Delete', enabled = true}}
+      action = {name = 'delete', label = 'Delete', enabled = true, tool = 'templates.delete'}}
   end
   local nodes = {
-    {id = 'start', type = 'widget', text = '', action = {name = 'start', label = 'Start Session…', enabled = #items > 0}},
-    {id = 'save', type = 'widget', text = '', action = {name = 'save', label = 'Save this session as a template…', enabled = true}},
+    {id = 'start', type = 'widget', text = '', action = {name = 'start', label = 'Start Session…', enabled = #items > 0, user_only = 'navigation'}},
+    {id = 'save', type = 'widget', text = '', action = {name = 'save', label = 'Save this session as a template…', enabled = true, user_only = 'navigation'}},
     {id = 'templates', type = 'list', label = 'Templates', items = items},
   }
   -- Every stuck start is listed (its create answer was lost, or a call failed), so it can always be
@@ -568,7 +568,7 @@ local function render_panel()
     if r.status == 'blocked' or r.status == 'pending' or r.status == 'unknown' then
       blocked = blocked or r.status == 'blocked'
       -- The label names the action, as the home's failed workers do ("· Dismiss").
-      stuck_items[#stuck_items + 1] = {id = r.id, label = label .. ' · Dismiss', detail = run_detail(r), action = {name = 'dismiss', label = 'Dismiss', enabled = true}}
+      stuck_items[#stuck_items + 1] = {id = r.id, label = label .. ' · Dismiss', detail = run_detail(r), action = {name = 'dismiss', label = 'Dismiss', enabled = true, tool = 'templates.dismiss'}}
     elseif #recent_items < 10 then
       recent_items[#recent_items + 1] = {id = r.id, label = label, detail = run_detail(r)}
     end
@@ -576,7 +576,7 @@ local function render_panel()
   local notice = switch_notice(runs)
   if notice then table.insert(nodes, 1, {id = 'switch', type = 'widget', text = notice}) end
   if #stuck_items > 0 then nodes[#nodes + 1] = {id = 'stuck', type = 'list', label = 'Unfinished starts', items = stuck_items} end
-  if blocked then nodes[#nodes + 1] = {id = 'retry', type = 'widget', text = '', action = {name = 'retry', label = 'Retry stuck starts', enabled = true}} end
+  if blocked then nodes[#nodes + 1] = {id = 'retry', type = 'widget', text = '', action = {name = 'retry', label = 'Retry stuck starts', enabled = true, tool = 'templates.retry'}} end
   if #recent_items > 0 then nodes[#nodes + 1] = {id = 'runs', type = 'list', label = 'Recent starts', items = recent_items} end
   return {title = 'Templates', nodes = nodes}
 end
@@ -592,7 +592,7 @@ local function render(args)
       nodes[1] = {id = 'empty', type = 'widget', text = 'This session has no panes to save.'}
     else
       nodes[1] = {id = 'save_template', type = 'form', fields = save_fields(cap, session_label(context.session_id)),
-        submit_action = {name = 'submit', label = 'Save template', enabled = true}}
+        submit_action = {name = 'submit', label = 'Save template', enabled = true, tool = 'templates.save'}}
       local help = 'A pane started from a profile keeps its profile and args. Other panes start as a shell unless you choose a profile.'
       if cap.dropped > 0 then help = help .. ' ' .. cap.dropped .. ' floating pane(s) are left out.' end
       nodes[2] = {id = 'save_help', type = 'widget', text = help}
@@ -606,7 +606,7 @@ local function render(args)
       nodes[1] = {id = 'empty', type = 'widget', text = 'No templates yet. Use Save as Template… in a session first.'}
     else
       nodes[1] = {id = 'start_session', type = 'form', fields = start_fields(context, list),
-        submit_action = {name = 'submit', label = 'Start session', enabled = not starting[args.view_id]}}
+        submit_action = {name = 'submit', label = 'Start session', enabled = not starting[args.view_id], tool = 'templates.start'}}
     end
     if starting[args.view_id] then
       table.insert(nodes, 1, {id = 'starting', type = 'widget', text = 'Starting… The app goes to the new session when its first tab opens.'})
@@ -661,9 +661,9 @@ for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}
 end
 rex.call('client.keymap', {actions = actions})
 hub('hub.register', {plugin = 'templates', instance_id = instance_id, exports = {}, commands = {
-  {id = 'start_session', title = 'Start Session…', description = 'Start a saved session template in a directory', keywords = {'template', 'workspace'}, route = '/forms/start'},
-  {id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save'},
-  {id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true},
+  {id = 'start_session', title = 'Start Session…', description = 'Start a saved session template in a directory', keywords = {'template', 'workspace'}, route = '/forms/start', action = 'templates.start'},
+  {id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'},
+  {id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'},
 }})
 invalidate = function() hub('hub.ui.invalidate', {}) end
 -- Starts that a restart interrupted continue from their durable records.
