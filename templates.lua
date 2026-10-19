@@ -209,13 +209,6 @@ local function load_template(name)
 end
 
 -- A form's operation key makes a submit safe to retry. The saved result answers a retry.
-local function saved_op(op_key, fingerprint)
-  local saved = hub('hub.store.op', {key = op_key})
-  if not saved.found then return nil end
-  if saved.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
-  return saved.result
-end
-local function op_key(prefix, operation_key) return prefix .. part(text(operation_key, 'operation key')) end
 
 local function cancel_node()
   return {id = 'cancel', type = 'widget', text = '', action = {name = '$cancel', label = 'Cancel', enabled = true}}
@@ -292,23 +285,111 @@ local function form_values(args)
   return type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
 end
 
-local function save_template(args)
-  local context = context_of(args)
-  local values = form_values(args)
-  local key = op_key('save/', args.operation_key)
-  local fingerprint = values_fingerprint('save-v2/', context, values)
-  local prior = saved_op(key, fingerprint)
+-- Callers (agent parity). The UI user acts through views; an agent through a forwarded export
+-- (hub.forward), identified by the hub from its pane. caller = {id, ids, session_id, pid}: ids
+-- are every ID of the agent (its identity and the legacy IDs it took over), so an operation or an
+-- owner recorded under an older ID still matches.
+local USER = {id = 'user', ids = {'user'}}
+local function agent_caller(pid)
+  if type(pid) ~= 'number' or pid <= 0 or pid % 1 ~= 0 then fail('refused', 'A positive requester PID is required') end
+  local r = hub('hub.identify', {pid = pid})
+  if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
+  local ids = {r.agent}
+  for _, l in ipairs(type(r.legacy) == 'table' and r.legacy or {}) do if type(l) == 'string' and l ~= '' then ids[#ids + 1] = l end end
+  return {id = r.agent, ids = ids, session_id = r.session_id, pid = pid}
+end
+local function owns(caller, owner)
+  if caller.id == 'user' then return true end
+  for _, id in ipairs(caller.ids) do if id == owner then return true end end
+  return false
+end
+
+-- Operation keys. The UI keeps its key format: '<kind>/' .. part(view key) (part starts with a
+-- digit). An agent key is '<kind>/agent/' .. part(agent ID) .. part(key), so the two can never be
+-- equal. op_keys lists the store keys to look up for a caller: one per ID of the agent.
+local function op_keys(kind, caller, key)
+  text(key, caller.id == 'user' and 'operation key' or 'key')
+  if caller.id == 'user' then return {kind .. '/' .. part(key)} end
+  local list = {}
+  for _, id in ipairs(caller.ids) do list[#list + 1] = kind .. '/agent/' .. part(id) .. part(key) end
+  return list
+end
+-- prior_op returns the saved result of the first key that has one (the caller's current ID
+-- first), or nil. Two IDs of one agent that both saved the key are a conflict.
+local function prior_op(keys, fingerprint)
+  local found, result = 0, nil
+  for _, k in ipairs(keys) do
+    local saved = hub('hub.store.op', {key = k})
+    if saved.found then
+      found = found + 1
+      if saved.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
+      result = result or saved.result
+    end
+  end
+  if found > 1 then fail('conflict', 'Two IDs of this agent used the key; use a new key') end
+  return result
+end
+
+-- canon is a canonical text of an agent's arguments for a fingerprint: type-tagged, part-framed,
+-- object keys sorted. The caller checks the types first; anything else is refused here too.
+local function canon(v)
+  local t = type(v)
+  if t == 'nil' then return 'N' end
+  if t == 'boolean' then return v and 'T' or 'F' end
+  if t == 'string' then return 's' .. part(v) end
+  if t == 'number' then return 'n' .. part(string.format('%.17g', v)) end
+  if t == 'table' then
+    -- An array (keys 1..n, n > 0) keeps its order; an empty table is an empty object.
+    local n = #v
+    if n > 0 then
+      local out, count = {'['}, 0
+      for _ in pairs(v) do count = count + 1 end
+      if count ~= n then fail('invalid_input', 'A list must not have other keys') end
+      for i = 1, n do out[#out + 1] = canon(v[i]) end
+      out[#out + 1] = ']'
+      return table.concat(out)
+    end
+    local keys = {}
+    for k in pairs(v) do
+      if type(k) ~= 'string' then fail('invalid_input', 'Object keys must be text') end
+      keys[#keys + 1] = k
+    end
+    table.sort(keys)
+    local out = {'{'}
+    for _, k in ipairs(keys) do out[#out + 1] = part(k) .. canon(v[k]) end
+    out[#out + 1] = '}'
+    return table.concat(out)
+  end
+  fail('invalid_input', 'Unsupported argument value')
+end
+local function opt_text(v, name)
+  if v == nil then return nil end
+  return text(v, name)
+end
+local function only(args, allowed)
+  if type(args) ~= 'table' then fail('invalid_input', 'Arguments must be an object') end
+  for k in pairs(args) do if not allowed[k] then fail('invalid_input', 'Unknown argument: ' .. tostring(k)) end end
+end
+
+-- Save. The form submit and templates.save call save_core. values are the form's values
+-- ({name, root, pane_<block> = choice}); fill = true takes the capture's guess for a pane that
+-- has no value (the agent path), else such a pane means the session changed (the form path).
+local function save_core(caller, keys, fingerprint, session_id, values, fill)
+  local prior = prior_op(keys, fingerprint)
   if prior then return prior end
   local name = text(values.name, 'Template name')
   if #name > 60 then fail('invalid_input', 'The template name is at most 60 characters') end
   local root = resolve_root(values.root)
-  local cap = capture(context.session_id)
-  -- The form shows the panes from its render. A pane added or closed since then needs a new form.
-  for _, id in ipairs(cap.order) do
-    if values['pane_' .. id] == nil then fail('conflict', 'The session changed. Open Save as Template… again.') end
-  end
+  local cap = capture(session_id)
   for k in pairs(values) do
     if k:sub(1, 5) == 'pane_' and not cap.panes[k:sub(6)] then fail('conflict', 'The session changed. Open Save as Template… again.') end
+  end
+  for _, id in ipairs(cap.order) do
+    if values['pane_' .. id] == nil then
+      if not fill then fail('conflict', 'The session changed. Open Save as Template… again.') end
+      local pane = cap.panes[id]
+      values['pane_' .. id] = pane.dir and (pane.guess or '@choose') or '@skip'
+    end
   end
   local launches = {}
   for _, id in ipairs(cap.order) do
@@ -335,19 +416,55 @@ local function save_template(args)
     if layout then tabs[#tabs + 1] = {title = tab.title, layout = layout} end
   end
   if #tabs == 0 then fail('invalid_input', 'The template has no panes') end
-  local template = {v = 1, name = name, tabs = tabs}
+  -- saved_by: who may delete it. An agent deletes only its own templates; the user any.
+  local template = {v = 1, name = name, tabs = tabs, saved_by = caller.id}
   local tkey = template_key(name)
   local existing = hub('hub.store.get', {keys = {tkey}}).records[tkey]
   if existing and existing.value ~= nil then fail('conflict', 'A template named "' .. name .. '" exists. Choose another name, or delete it in Templates.') end
-  local result = {close_form = true}
+  local result = caller.id == 'user' and {close_form = true} or {name = name}
   local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = existing and existing.rev or '0', value = template}},
-    op = {key = key, fingerprint = fingerprint, result = result}})
-  if stored.op_exists then return saved_op(key, fingerprint) end
+    op = {key = keys[1], fingerprint = fingerprint, result = result}})
+  if stored.op_exists then return prior_op(keys, fingerprint) end
   if stored.conflict then fail('conflict', 'A template with this name was saved meanwhile. Choose another name.') end
   return result
 end
 
--- The engine and its adapter to hub.spawn_window.
+local function save_template(args)
+  local context = context_of(args)
+  local values = form_values(args)
+  return save_core(USER, op_keys('save', USER, args.operation_key), values_fingerprint('save-v2/', context, values), context.session_id, values, false)
+end
+
+-- templates.save {name, root, session_id?, panes?, key}. panes maps a block ID to 'shell',
+-- 'profile:<id>' or 'skip'; a pane without an entry takes the capture's guess. The fingerprint
+-- covers the raw arguments (an omitted session is 'default'), so a retry answers before anything
+-- live is read.
+local function agent_save(caller, args)
+  only(args, {name = true, root = true, session_id = true, panes = true, key = true})
+  text(args.name, 'name'); text(args.root, 'root'); opt_text(args.session_id, 'session_id')
+  if args.panes ~= nil then
+    if type(args.panes) ~= 'table' then fail('invalid_input', 'panes must be an object') end
+    for id, choice in pairs(args.panes) do
+      text(id, 'pane block ID')
+      if type(choice) ~= 'string' or not (choice == 'shell' or choice == 'skip' or choice:match('^profile:.+')) then
+        fail('invalid_input', 'A pane choice is shell, skip or profile:<id>')
+      end
+    end
+  end
+  local fingerprint = 'save-agent-v1/' .. canon({name = args.name, root = args.root, session_id = args.session_id or false, panes = args.panes or {}})
+  local session_id = args.session_id or caller.session_id
+  local values = {name = args.name, root = args.root}
+  for id, choice in pairs(args.panes or {}) do values['pane_' .. id] = choice == 'skip' and '@skip' or choice end
+  if type(session_id) ~= 'string' or session_id == '' then
+    local prior = prior_op(op_keys('save', caller, args.key), fingerprint)
+    if prior then return prior end
+    fail('invalid_input', 'You have no session; set session_id')
+  end
+  return save_core(caller, op_keys('save', caller, args.key), fingerprint, session_id, values, true)
+end
+
+-- The engine and its adapter to hub.spawn_window. A user's start acts for "user"; an agent's
+-- start sends each tab with the run's grant (grant_id), exactly as the grant names it.
 local function hub_layout(node)
   if node.direction then
     return {split = {direction = node.direction, ratio = node.ratio, before = hub_layout(node.before), after = hub_layout(node.after)}}
@@ -361,8 +478,11 @@ local function hub_layout(node)
   return {leaf = leaf}
 end
 local function start_tab(request)
-  local args = {['for'] = 'user', key = request.key, session = request.session, title = request.title, layout = hub_layout(request.layout)}
-  if request.placement then args.placement = request.placement end
+  local args = {key = request.key, session = request.session, title = request.title, layout = hub_layout(request.layout)}
+  if request.grant_id then args.grant_id = request.grant_id else
+    args['for'] = 'user'
+    if request.placement then args.placement = request.placement end
+  end
   local r = hub('hub.spawn_window', args)
   local blocks, err = {}, nil
   for _, leaf in ipairs(r.leaves or {}) do
@@ -371,8 +491,28 @@ local function start_tab(request)
   end
   return {status = r.status, window_id = r.window_id, block_ids = blocks, error = err}
 end
+-- grant_entries are the exact requests that an agent's run will send: one hub.spawn_window per
+-- tab. A new session is named by its ensure key (the hub resolves it); a chosen one by its ID.
+local function grant_entries(run)
+  local entries = {}
+  for _, tab in ipairs(run.tabs) do
+    entries[#entries + 1] = {action = 'hub.spawn_window', key = tab.key, request = {
+      session = run.session_id or {ensure_key = run.session_key}, title = tab.title, layout = hub_layout(tab.layout)}}
+  end
+  return entries
+end
+local function grant_key(run) return 'run/' .. run.id end
+-- find_grant (engine recovery): the grant of this run if the hub has it, active, for the run's
+-- agent and with exactly the run's requests. It never creates one: that needs the agent's call.
+local function find_grant(run)
+  local g = hub('hub.grant.get', {key = grant_key(run)})
+  if not g.found or g.state ~= 'active' or g.agent ~= run.request.by then return nil end
+  if canon(g.entries) ~= canon(grant_entries(run)) then return nil end
+  return g.grant_id
+end
 local invalidate
 local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = resolve_root, resolve_dir = resolve_dir,
+  find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   changed = function() if invalidate then pcall(invalidate) end end})
 local tick_timer
 -- Ticks run outside action handlers. An error stops the loop until the next wake (contract).
@@ -414,7 +554,8 @@ end
 -- until the first tab opens, the start stops, or SWITCH_WAIT seconds pass. Then the plugin asks
 -- hub.app.select_session from the still-open form; the hub refuses when the user left the form.
 -- The decision is one-shot under the start's operation key: 'attempted' commits before the call,
--- so a crash or lost answer after it reads as 'unknown' and never switches again.
+-- so a crash or lost answer after it reads as 'unknown' and never switches again. An agent's
+-- start never switches the app: it has no form.
 local SWITCH_WAIT = tonumber(rex.args.switch_wait) or 15 -- tests pass a shorter wait
 local starting = {} -- view_id -> true while its start form waits (render only)
 local function switch_key(start_key) return 'switch/' .. hex(start_key) end
@@ -460,13 +601,12 @@ local function switch_app(view_id, start_key, run_id, at)
   return value
 end
 
--- A start freezes its engine request under the form's operation key before admission, so a retry
--- after a lost reply admits the same request even if the template was edited or deleted since.
-local function start_session(args)
-  local context = context_of(args)
-  local values = form_values(args)
-  local key = 'start/' .. part(text(args.operation_key, 'operation key'))
-  local fingerprint = values_fingerprint('start-v1/', context, values)
+-- start_core admits a start for a caller. It freezes the engine request under the operation key
+-- before admission, so a retry after a lost reply admits the same request even if the template
+-- was edited or deleted since. intent = {template, root, session_id | new_session_name,
+-- placement?}. An agent's start also gets the grant of its exact tab requests, in the agent's
+-- call (caller.pid); the run dispatches nothing before it (templates_run.lua).
+local function start_core(caller, key, fingerprint, intent)
   local record_key = 'start-form/' .. hex(key)
   local request, at
   local saved = hub('hub.store.get', {keys = {record_key}}).records[record_key]
@@ -475,22 +615,41 @@ local function start_session(args)
     -- A record from before the switch has no time: its wait is over.
     request, at = saved.value.request, type(saved.value.at) == 'number' and saved.value.at or 0
   else
-    local tpl = load_template(values.template)
-    request = {key = key, template = tpl, root = text(values.root, 'Root')}
-    -- Each tab focuses its first pane only while the form's tab is still the active one in the
-    -- target session (hub.spawn_window). In a new session it never matches; switch_app moves the app.
-    if type(context.window_id) == 'string' and context.window_id ~= '' then
-      request.placement = {focus = {source_window_id = context.window_id}}
-    end
-    if values.session_id == '@new' then
-      request.new_session_name = type(values.session_name) == 'string' and values.session_name ~= '' and values.session_name or tpl.name
-    else request.session_id = text(values.session_id, 'Session') end
+    local tpl = load_template(intent.template)
+    request = {key = key, template = {v = tpl.v, name = tpl.name, tabs = tpl.tabs}, root = text(intent.root, 'Root')}
+    if intent.placement then request.placement = intent.placement end
+    if intent.session_id then request.session_id = intent.session_id
+    else request.new_session_name = intent.new_session_name or tpl.name end
+    if caller.id ~= 'user' then request.by = caller.id end
     at = os.time()
     local stored = hub('hub.store.batch', {ops = {{key = record_key, if_rev = saved and saved.rev or '0', value = {fingerprint = fingerprint, request = request, at = at}}}})
     if stored.conflict then fail('conflict', 'This start is being submitted twice; retry with the same key') end
   end
-  local run_state = engine.admit(request)
+  local run = engine.admit(request)
+  if run.request.by and run.grant_id == nil and run.status == 'authorizing' then
+    if not caller.pid then fail('refused', 'Only the agent that started the run can authorize it') end
+    local g = hub('hub.grant.create', {on_behalf = caller.pid, key = grant_key(run), entries = grant_entries(run)})
+    if g.state ~= 'active' then fail('conflict', 'The grant of this start was revoked') end
+    run = engine.authorize(run.id, g.grant_id)
+  end
   pump()
+  return request, run, at
+end
+
+local function start_session(args)
+  local context = context_of(args)
+  local values = form_values(args)
+  local key = op_keys('start', USER, args.operation_key)[1]
+  local intent = {template = values.template, root = values.root}
+  -- Each tab focuses its first pane only while the form's tab is still the active one in the
+  -- target session (hub.spawn_window). In a new session it never matches; switch_app moves the app.
+  if type(context.window_id) == 'string' and context.window_id ~= '' then
+    intent.placement = {focus = {source_window_id = context.window_id}}
+  end
+  if values.session_id == '@new' then
+    intent.new_session_name = type(values.session_name) == 'string' and values.session_name ~= '' and values.session_name or nil
+  else intent.session_id = text(values.session_id, 'Session') end
+  local request, run_state, at = start_core(USER, key, values_fingerprint('start-v1/', context, values), intent)
   local done = {panel = {route = '/panels/templates'}, run_id = run_state.id}
   -- "Add to existing session" never switches: the first new tab already has the focus there.
   if not request.new_session_name then return done end
@@ -501,6 +660,29 @@ local function start_session(args)
   end
   starting[view_id] = nil
   return done
+end
+
+-- templates.start {template, root, session_id? | new_session?, key} -> {run_id}. Neither session
+-- field: a new session named after the template (the form's default). The result is the stable
+-- admission; templates.runs gives the live state.
+local function agent_start(caller, args)
+  only(args, {template = true, root = true, session_id = true, new_session = true, key = true})
+  text(args.template, 'template'); text(args.root, 'root')
+  opt_text(args.session_id, 'session_id'); opt_text(args.new_session, 'new_session')
+  if args.session_id and args.new_session then fail('invalid_input', 'Set session_id or new_session, not both') end
+  local fingerprint = 'start-agent-v1/' .. canon({template = args.template, root = args.root,
+    session_id = args.session_id or false, new_session = args.new_session or false})
+  local keys = op_keys('start', caller, args.key)
+  -- A start of another ID of this agent with this key is the same operation (its record).
+  local key = keys[1]
+  for _, k in ipairs(keys) do
+    local rk = 'start-form/' .. hex(k)
+    local r = hub('hub.store.get', {keys = {rk}}).records[rk]
+    if r and r.value ~= nil then key = k; break end
+  end
+  local _, run = start_core(caller, key, fingerprint, {template = args.template, root = args.root,
+    session_id = args.session_id, new_session_name = args.new_session})
+  return {run_id = run.id}
 end
 
 -- Templates panel: saved templates and recent starts.
@@ -530,7 +712,7 @@ local switch_reasons = {
 }
 local function switch_notice(runs)
   local r = runs[1]
-  if not r or not r.request.new_session_name then return nil end
+  if not r or not r.request.new_session_name or r.request.by then return nil end
   local skey = switch_key(r.request.key)
   local saved = hub('hub.store.get', {keys = {skey}}).records[skey]
   local sw = saved and type(saved.value) == 'table' and saved.value
@@ -547,6 +729,7 @@ local function switch_notice(runs)
   return name .. ' started in the new session ' .. session .. '. The app did not switch to it: '
     .. (switch_reasons[sw.code] or tostring(sw.message)) .. '. To go there, use Go to Session in the Rex app.'
 end
+local function stuck(r) return r.status == 'blocked' or r.status == 'pending' or r.status == 'unknown' or r.status == 'authorizing' end
 local function render_panel()
   local items = {}
   for _, t in ipairs(templates()) do
@@ -559,16 +742,20 @@ local function render_panel()
     {id = 'templates', type = 'list', label = 'Templates', items = items},
   }
   -- Every stuck start is listed (its create answer was lost, or a call failed), so it can always be
-  -- dismissed; Dismiss closes no pane. Then the 10 newest other starts. Retry wakes blocked starts;
-  -- a pending start waits for the hub.
-  local stuck_items, recent_items, blocked = {}, {}, false
+  -- dismissed; Dismiss closes no pane. A blocked start also gets a Retry row. Then the 10 newest
+  -- other starts. A pending start waits for the hub.
+  local stuck_items, recent_items = {}, {}
   local runs = recent_runs()
   for _, r in ipairs(runs) do
     local label = r.request.template.name .. ' in ' .. short(r.root)
-    if r.status == 'blocked' or r.status == 'pending' or r.status == 'unknown' then
-      blocked = blocked or r.status == 'blocked'
+    if stuck(r) then
       -- The label names the action, as the home's failed workers do ("· Dismiss").
-      stuck_items[#stuck_items + 1] = {id = r.id, label = label .. ' · Dismiss', detail = run_detail(r), action = {name = 'dismiss', label = 'Dismiss', enabled = true, tool = 'templates.dismiss'}}
+      if r.status == 'blocked' then
+        stuck_items[#stuck_items + 1] = {id = 'retry:' .. r.id, label = label .. ' · Retry', detail = run_detail(r),
+          action = {name = 'retry', label = 'Retry', enabled = true, tool = 'templates.retry'}}
+      end
+      stuck_items[#stuck_items + 1] = {id = 'dismiss:' .. r.id, label = label .. ' · Dismiss', detail = run_detail(r),
+        action = {name = 'dismiss', label = 'Dismiss', enabled = true, tool = 'templates.dismiss'}}
     elseif #recent_items < 10 then
       recent_items[#recent_items + 1] = {id = r.id, label = label, detail = run_detail(r)}
     end
@@ -576,7 +763,6 @@ local function render_panel()
   local notice = switch_notice(runs)
   if notice then table.insert(nodes, 1, {id = 'switch', type = 'widget', text = notice}) end
   if #stuck_items > 0 then nodes[#nodes + 1] = {id = 'stuck', type = 'list', label = 'Unfinished starts', items = stuck_items} end
-  if blocked then nodes[#nodes + 1] = {id = 'retry', type = 'widget', text = '', action = {name = 'retry', label = 'Retry stuck starts', enabled = true, tool = 'templates.retry'}} end
   if #recent_items > 0 then nodes[#nodes + 1] = {id = 'runs', type = 'list', label = 'Recent starts', items = recent_items} end
   return {title = 'Templates', nodes = nodes}
 end
@@ -624,6 +810,52 @@ local function render(args)
   return {tree = tree}
 end
 
+-- Delete: the deletion and its result commit together; a retry never deletes a newer template.
+-- The operation answers first, then the owner check: an agent deletes only templates it saved;
+-- the user any (a template from before saved_by has no owner: the user's only).
+local function delete_core(caller, keys, name)
+  local fingerprint = 'delete-v1/' .. part(tostring(name))
+  local prior = prior_op(keys, fingerprint)
+  if prior then return prior end
+  local tpl, rev, tkey = load_template(name)
+  if not owns(caller, tpl.saved_by or 'user') then fail('refused', 'Only the user or the agent that saved "' .. name .. '" can delete it') end
+  local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = rev, delete = true}}, op = {key = keys[1], fingerprint = fingerprint, result = {}}})
+  if stored.op_exists then return prior_op(keys, fingerprint) end
+  if stored.conflict then fail('conflict', 'The template changed; try again') end
+  return {}
+end
+
+-- Dismiss and retry act on one run. The user acts on any run; an agent only on its own.
+local function own_run(caller, id)
+  local run = engine.get(text(id, 'run'))
+  if not owns(caller, run.request.by or 'user') then fail('refused', 'Only the user or the agent that started this run can change it') end
+  return run
+end
+local function dismiss_core(caller, keys, id)
+  local fingerprint = 'dismiss-v1/' .. part(tostring(id))
+  local prior = prior_op(keys, fingerprint)
+  if prior then return prior end
+  own_run(caller, id)
+  -- The dismissed state and the operation result commit in one batch (engine.dismiss).
+  engine.dismiss(id, {key = keys[1], fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
+  pump()
+  return {run_id = id, status = 'dismissed'}
+end
+-- Retry wakes one run now. The engine retries every unfinished run at each start of the plugin
+-- (engine.resume), so a crash after the saved result loses no work, and a repeated wake only
+-- repeats idempotent tab requests. The saved result answers a replay without a second wake.
+local function retry_core(caller, keys, id)
+  local fingerprint = 'retry-v1/' .. part(tostring(id))
+  local prior = prior_op(keys, fingerprint)
+  if prior then return prior end
+  local run = own_run(caller, id)
+  local result = {run_id = id, woken = run.status == 'blocked' or run.status == 'pending' or run.status == 'unknown'}
+  local stored = hub('hub.store.batch', {ops = {}, op = {key = keys[1], fingerprint = fingerprint, result = result}})
+  if stored.op_exists then return prior_op(keys, fingerprint) end
+  if result.woken then engine.wake_one(id); pump() end
+  return result
+end
+
 local function action(args)
   if args.route == '/forms/save' then
     if args.node_id ~= 'save_template' or args.action ~= 'submit' then fail('invalid_input', 'Unknown form action') end
@@ -638,29 +870,119 @@ local function action(args)
     if args.node_id == 'save' then return {form = '/forms/save'} end
     local item = type(args.input) == 'table' and args.input.item_id
     if args.node_id == 'templates' and args.action == 'delete' then
-      -- The deletion and its result commit together; a retry never deletes a newer template.
-      local key = op_key('delete/', args.operation_key)
-      local fingerprint = 'delete-v1/' .. part(tostring(item))
-      local prior = saved_op(key, fingerprint)
-      if prior then return prior end
-      local _, rev, tkey = load_template(item)
-      local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = rev, delete = true}}, op = {key = key, fingerprint = fingerprint, result = {}}})
-      if stored.op_exists then return saved_op(key, fingerprint) end
-      if stored.conflict then fail('conflict', 'The template changed; try again') end
-      return {}
+      return delete_core(USER, op_keys('delete', USER, args.operation_key), item)
     end
-    if args.node_id == 'retry' then wake(); return {} end
-    if args.node_id == 'stuck' and args.action == 'dismiss' then engine.dismiss(text(item, 'run')); return {} end
+    if args.node_id == 'stuck' and type(item) == 'string' then
+      if args.action == 'dismiss' and item:sub(1, 8) == 'dismiss:' then
+        dismiss_core(USER, op_keys('dismiss', USER, args.operation_key), item:sub(9)); return {}
+      end
+      if args.action == 'retry' and item:sub(1, 6) == 'retry:' then
+        retry_core(USER, op_keys('retry', USER, args.operation_key), item:sub(7)); return {}
+      end
+    end
   end
   fail('invalid_input', 'Unknown view action')
 end
 
-local actions = {}
+-- Agent actions (exports; the hub forwards them as MCP tools). Each calls the handler of its UI
+-- action with the same checks.
+local function template_view(t)
+  return {name = t.name, tabs = t.tabs, saved_by = t.saved_by}
+end
+local function run_view(r)
+  return {id = r.id, template = r.request.template.name, root = r.root, status = r.status, next_tab = r.next_tab,
+    tabs = #r.tabs, error = r.error, by = r.request.by or 'user', session_id = r.session_id}
+end
+local agent_handlers = {
+  ['templates.list'] = function(_, args)
+    only(args, {})
+    local list = {}
+    for _, t in ipairs(templates()) do list[#list + 1] = template_view(t) end
+    return {templates = list}
+  end,
+  ['templates.capture'] = function(caller, args)
+    only(args, {session_id = true})
+    local session_id = opt_text(args.session_id, 'session_id') or caller.session_id
+    if type(session_id) ~= 'string' or session_id == '' then fail('invalid_input', 'You have no session; set session_id') end
+    local cap = capture(session_id)
+    local dirs, panes = {}, {}
+    for _, id in ipairs(cap.order) do
+      local p = cap.panes[id]
+      if p.dir then dirs[#dirs + 1] = p.dir end
+      panes[#panes + 1] = {block_id = id, tab = p.tab, tab_title = cap.tabs[p.tab].title, dir = p.dir,
+        guess = p.guess, args = p.args, detail = p.detail}
+    end
+    local profile_list = {}
+    for _, p in ipairs(profiles()) do profile_list[#profile_list + 1] = {id = p.id, name = p.name or p.id} end
+    return {session_id = session_id, root_guess = common_root(dirs), profiles = profile_list, panes = panes, dropped = cap.dropped}
+  end,
+  ['templates.save'] = agent_save,
+  ['templates.start'] = agent_start,
+  ['templates.runs'] = function(_, args)
+    only(args, {})
+    local list = {}
+    for _, r in ipairs(recent_runs()) do list[#list + 1] = run_view(r) end
+    return {runs = list}
+  end,
+  ['templates.delete'] = function(caller, args)
+    only(args, {template = true, key = true})
+    return delete_core(caller, op_keys('delete', caller, args.key), text(args.template, 'template'))
+  end,
+  ['templates.dismiss'] = function(caller, args)
+    only(args, {run_id = true, key = true})
+    return dismiss_core(caller, op_keys('dismiss', caller, args.key), text(args.run_id, 'run_id'))
+  end,
+  ['templates.retry'] = function(caller, args)
+    only(args, {run_id = true, key = true})
+    return retry_core(caller, op_keys('retry', caller, args.key), text(args.run_id, 'run_id'))
+  end,
+}
+local key_arg = {type = 'string', minLength = 1, description = 'Your operation key. Retry with the same key and content after an unknown outcome.'}
+local exports = {
+  {name = 'templates.list', title = 'List session templates',
+    description = 'List the saved session templates: name, tabs (title and layout; each pane has a launch and a directory relative to the root) and saved_by.',
+    args = {type = 'object', properties = {}, additionalProperties = false}},
+  {name = 'templates.capture', title = 'Capture a session for a template',
+    description = 'Read what Save as Template would save from a session (default: yours): each pane with its tab, directory, launch guess (shell or profile:<id>) and profile args, the profiles, and a root guess.',
+    args = {type = 'object', properties = {session_id = {type = 'string', minLength = 1}}, additionalProperties = false}},
+  {name = 'templates.save', title = 'Save a session as a template',
+    description = 'Save the tabs of a session (default: yours) as a template. panes maps a block_id from templates.capture to shell, profile:<id> or skip; a pane without an entry takes its guess. Every pane must be under root.',
+    args = {type = 'object', properties = {name = {type = 'string', minLength = 1, maxLength = 60}, root = {type = 'string', minLength = 1},
+      session_id = {type = 'string', minLength = 1}, panes = {type = 'object', additionalProperties = {type = 'string'}}, key = key_arg},
+      required = {'name', 'root', 'key'}, additionalProperties = false}},
+  {name = 'templates.start', title = 'Start a session template',
+    description = 'Start a template in a root directory: in an open session (session_id) or a new session (new_session, a name). With neither, a new session named after the template. The tabs open after this call returns; templates.runs shows the progress. You own the started panes.',
+    args = {type = 'object', properties = {template = {type = 'string', minLength = 1}, root = {type = 'string', minLength = 1},
+      session_id = {type = 'string', minLength = 1}, new_session = {type = 'string', minLength = 1}, key = key_arg},
+      required = {'template', 'root', 'key'}, additionalProperties = false}},
+  {name = 'templates.runs', title = 'List template starts',
+    description = 'List template starts, newest first: id, template, root, status (authorizing, queued, starting, pending, unknown, blocked, open, failed, closed, dismissed), tabs, error, by and session_id.',
+    args = {type = 'object', properties = {}, additionalProperties = false}},
+  {name = 'templates.delete', title = 'Delete a session template',
+    description = 'Delete a template that you saved.',
+    args = {type = 'object', properties = {template = {type = 'string', minLength = 1}, key = key_arg}, required = {'template', 'key'}, additionalProperties = false}},
+  {name = 'templates.dismiss', title = 'Dismiss a template start',
+    description = 'Stop the rest of a start of yours that is pending, unknown, blocked or not authorized. It closes no pane.',
+    args = {type = 'object', properties = {run_id = {type = 'string', minLength = 1}, key = key_arg}, required = {'run_id', 'key'}, additionalProperties = false}},
+  {name = 'templates.retry', title = 'Retry a template start',
+    description = 'Try a blocked start of yours again now.',
+    args = {type = 'object', properties = {run_id = {type = 'string', minLength = 1}, key = key_arg}, required = {'run_id', 'key'}, additionalProperties = false}},
+}
+
+local actions, export_names = {}, {}
+for _, e in ipairs(exports) do
+  export_names[#export_names + 1] = e.name
+  actions[#actions + 1] = {name = e.name, kind = 'client', title = e.title, description = e.description, args = e.args}
+end
 for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}) do
   actions[#actions + 1] = {name = name, kind = 'client', title = name, args = {type = 'object', additionalProperties = true}}
 end
+-- Only the hub can assert the original caller of a forwarded export.
+actions[#actions + 1] = {name = 'hub.forward', kind = 'client', title = 'Forward an agent action',
+  args = {type = 'object', properties = {action = {type = 'string'}, args = {type = 'object'}, requester_pid = {type = 'integer'}},
+    required = {'action', 'args', 'requester_pid'}, additionalProperties = false}}
 rex.call('client.keymap', {actions = actions})
-hub('hub.register', {plugin = 'templates', instance_id = instance_id, exports = {}, commands = {
+hub('hub.register', {plugin = 'templates', instance_id = instance_id, exports = export_names, commands = {
   {id = 'start_session', title = 'Start Session…', description = 'Start a saved session template in a directory', keywords = {'template', 'workspace'}, route = '/forms/start', action = 'templates.start'},
   {id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'},
   {id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'},
@@ -673,6 +995,11 @@ rex.on('client_perform_requested', function(ctx, ev)
   local ok, result = pcall(function()
     if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub calls this plugin') end
     local args = ev.args or {}
+    if ev.action == 'hub.forward' then
+      local handler = agent_handlers[args.action]
+      if not handler then fail('refused', 'The forwarded action is not exported') end
+      return handler(agent_caller(args.requester_pid), type(args.args) == 'table' and args.args or {})
+    end
     if ev.action == 'view.render' then return render(args) end
     if ev.action == 'view.action' then return action(args) end
     if ev.action == 'hub.changed' then

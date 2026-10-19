@@ -82,16 +82,16 @@ decimal IDs without relying on floating-point integer precision. Spawn keys use
 Run the controlled tests locally:
 
 ```sh
-lua spikes/03-ui-framework/tests/templates-run.lua "$PWD/spikes/03-ui-framework/plugins/templates_run.lua"
+lua tests/legacy/templates-run.lua "$PWD/templates_run.lua"
 ```
 
 Run the same suite in an isolated Rex server:
 
 ```sh
 rex -S unix:///tmp/rexlab-templates-codex/rex.sock --autostart=false do \
-  "$PWD/spikes/03-ui-framework/tests/templates-run.lua" --all \
-  module="$PWD/spikes/03-ui-framework/plugins/templates_run.lua"
-node spikes/03-ui-framework/tests/templates-layout-lab.mjs
+  "$PWD/tests/legacy/templates-run.lua" --all \
+  module="$PWD/templates_run.lua"
+node tests/templates-layout-lab.mjs
 ```
 
 The sixteen controlled tests cover admission without a side effect, copied inputs,

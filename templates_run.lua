@@ -43,6 +43,11 @@ end
 local function finished(run)
   return run.status == 'open' or run.status == 'failed' or run.status == 'closed' or run.status == 'dismissed'
 end
+-- An agent's run sends its tabs with a durable grant of the hub (hub.grant.create, made while the
+-- agent's call ran). Without an active grant it dispatches nothing: no session, no tab.
+local function by_agent(run) return run.request.by ~= nil and run.request.by ~= 'user' end
+-- A finished agent run gives its grant back (hub.grant.revoke) after its final state commits.
+local function owes_revoke(run) return finished(run) and run.grant_id ~= nil and not run.grant_revoked end
 
 function M.new(opts)
   local hub = assert(opts.hub, 'hub is required')
@@ -60,13 +65,13 @@ function M.new(opts)
     if not record or type(record.rev) ~= 'string' then fail('unavailable', 'Invalid store result') end
     return record.value, record.rev
   end
-  local function batch(ops)
-    local result = hub('hub.store.batch', {ops = ops})
+  local function batch(ops, op)
+    local result = hub('hub.store.batch', {ops = ops, op = op})
     if result.conflict then fail('conflict', 'Template run changed; retry with the same key') end
     if not result.revs then fail('unavailable', 'Invalid store batch result') end
   end
-  local function save(run, rev)
-    batch({{key = 'run/' .. run.id, if_rev = rev, value = run}})
+  local function save(run, rev, op)
+    batch({{key = 'run/' .. run.id, if_rev = rev, value = run}}, op)
     if opts.changed then pcall(opts.changed, copy(run)) end
   end
   local function compile(node, root)
@@ -108,7 +113,7 @@ function M.new(opts)
   -- Repeated admission uses the original request before checking today's directories or template.
   -- The frozen requests survive a changed profile, template, cwd, or plugin process.
   function engine.admit(request)
-    fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true}, 'run request')
+    fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
     text(request.key, 'key')
     local admission_key = 'run-key/' .. request.key
     local existing, admission_rev = read(admission_key)
@@ -119,6 +124,8 @@ function M.new(opts)
       return run
     end
     if (request.session_id ~= nil) == (request.new_session_name ~= nil) then fail('invalid_input', 'Choose one existing or new session') end
+    if request.by ~= nil then text(request.by, 'by') end
+    if request.by ~= nil and request.by ~= 'user' and request.placement ~= nil then fail('invalid_input', 'An agent start has no placement') end
     text(request.session_id or request.new_session_name, 'session')
     if request.placement ~= nil then
       fields(request.placement, {focus=true}, 'placement')
@@ -153,6 +160,8 @@ function M.new(opts)
     if carry == 1 then id = '1' .. id end
     local run = {id=id, request=copy(request), root=root, tabs=tabs, next_tab=1,
       status='queued', results={}, session_key='templates/' .. id .. '/session'}
+    -- An agent's run waits for its grant (engine.authorize) before it dispatches anything.
+    if by_agent(run) then run.status = 'authorizing' end
     if request.session_id then run.session_id = request.session_id end
     for i, tab in ipairs(tabs) do tab.key = 'templates/' .. id .. '/tab/' .. tostring(i) end
     batch({{key=admission_key, if_rev=admission_rev, value={id=id}},
@@ -171,22 +180,71 @@ function M.new(opts)
 
   -- Dismiss stops only this run's remaining orchestration. A sent Rex request can still finish.
   -- Keep its requests and results for inspection; never stop, close, or recreate its resources.
-  function engine.dismiss(id)
+  -- op (optional) is the caller's operation record {key, fingerprint, result}: it commits in the
+  -- same batch as the dismissed state, so a lost reply cannot split them.
+  function engine.dismiss(id, op)
     text(id, 'run id')
     local run, rev = read('run/' .. id)
     if not run then fail('not_found', 'Template run not found') end
-    if run.status == 'dismissed' then return copy(run) end
-    if run.status ~= 'pending' and run.status ~= 'unknown' and run.status ~= 'blocked' then
-      fail('conflict', 'Only a pending, unknown or blocked run can be dismissed')
+    if run.status == 'dismissed' then
+      if op then batch({}, op) end
+      return copy(run)
+    end
+    if run.status ~= 'pending' and run.status ~= 'unknown' and run.status ~= 'blocked' and run.status ~= 'authorizing' then
+      fail('conflict', 'Only a pending, unknown, blocked or unauthorized run can be dismissed')
     end
     run.dismissed_from, run.status = run.status, 'dismissed'
-    save(run, rev)
+    save(run, rev, op)
+    if owes_revoke(run) then enqueue(id) end
     return copy(run)
+  end
+
+  -- authorize records the grant of an agent's run and lets it dispatch. A run that is no longer
+  -- waiting (finished, dismissed, or already authorized) keeps its state.
+  function engine.authorize(id, grant_id)
+    text(id, 'run id')
+    text(grant_id, 'grant id')
+    local run, rev = read('run/' .. id)
+    if not run then fail('not_found', 'Template run not found') end
+    if run.grant_id ~= nil then
+      if run.grant_id ~= grant_id then fail('conflict', 'The run has another grant') end
+      return copy(run)
+    end
+    run.grant_id = grant_id
+    if run.status == 'authorizing' then run.status, run.error = 'queued', nil end
+    save(run, rev)
+    enqueue(id)
+    return copy(run)
+  end
+
+  -- wake_one schedules one run now (Retry). A finished run is not scheduled.
+  function engine.wake_one(id)
+    local run = engine.get(id)
+    if not finished(run) then enqueue(id) end
+    return run
   end
 
   local function advance(id)
     local run, rev = read('run/' .. id)
-    if not run or finished(run) then return end
+    if not run then return end
+    if owes_revoke(run) then
+      -- The final state is committed: give the grant back. A failure retries at the next wake.
+      if opts.revoke and pcall(opts.revoke, run.grant_id) then
+        run.grant_revoked = true
+        save(run, rev)
+      end
+      return
+    end
+    if finished(run) then return end
+    if by_agent(run) and run.grant_id == nil then
+      -- No grant yet (a crash between admission and the grant): find it, or wait for a retry of
+      -- the start in a new agent call. Nothing dispatches before it.
+      local grant_id = opts.find_grant and opts.find_grant(copy(run))
+      if grant_id then engine.authorize(id, grant_id) return end
+      local msg = 'The start is not authorized yet; retry the start with the same key'
+      if run.error ~= msg then run.error = msg; save(run, rev) end
+      return
+    end
     if not run.session_id then
       -- The ensure key and name were committed at admission. Never replace an unknown session.
       local ok, result = pcall(hub, 'hub.session.ensure', {key=run.session_key, name=run.request.new_session_name})
@@ -206,6 +264,7 @@ function M.new(opts)
       -- Commit the complete adapter input before the first call. Binding the session is a write.
       tab.request = {key=tab.key, session=run.session_id, title=tab.title, layout=copy(tab.layout)}
       if run.request.placement then tab.request.placement = copy(run.request.placement) end
+      if run.grant_id then tab.request.grant_id = run.grant_id end
       run.status = 'starting'
       save(run, rev)
       enqueue(id)
@@ -235,7 +294,7 @@ function M.new(opts)
       run.status, run.error = 'blocked', 'Unrecognized tab start status; outcome unknown'
     end
     save(run, rev)
-    if run.status == 'queued' then enqueue(id) end
+    if run.status == 'queued' or owes_revoke(run) then enqueue(id) end
   end
 
   -- Wake scans one store page per tick. Pending and unknown runs wait for a worker event,
@@ -254,7 +313,7 @@ function M.new(opts)
         if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run scan') end
         for _, record in pairs(page.records) do
           local run = record.value
-          if run and not finished(run) then enqueue(run.id) end
+          if run and (not finished(run) or owes_revoke(run)) then enqueue(run.id) end
         end
         after, scanning = page.next, page.next ~= nil
         return
