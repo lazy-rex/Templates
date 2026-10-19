@@ -14,13 +14,18 @@ The plugin loads its other files from its own directory, so keep them together.
 
 ## Tests
 
-The tests use `../LazyRex` (the client library in `lib/` and the lab harness in `lab/`).
-Start an isolated lab server first, and never point tests at your own Rex server:
+The tests are Lua files in `tests/`. `lazyrex-hub test` runs them in its own lab Rex server
+(LazyRex `docs/testing.md`):
+
+```sh
+lazyrex-hub test
+```
+
+`tests/templates-lab.mjs` is a Node test that has no Lua replacement yet. It uses `../LazyRex`
+(the client library in `lib/` and the lab harness in `lab/`). Start an isolated lab server first,
+and never point it at your own Rex server:
 
 ```sh
 ../LazyRex/lab/server.sh /tmp/rexlab
-REX_SERVER=unix:///tmp/rexlab/rex.sock node tests/<name>.mjs
+REX_SERVER=unix:///tmp/rexlab/rex.sock node tests/templates-lab.mjs
 ```
-
-- templates-plugin.mjs (mock hub)
-- templates-lab.mjs, templates-layout-lab.mjs (lab)

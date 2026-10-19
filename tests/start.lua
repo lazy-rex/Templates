@@ -128,7 +128,7 @@ test('a nested layout starts with its ratios, its leaf order and each leaf\'s di
   end, 20)
 end)
 
--- The Rex contract under hub.spawn_window (formerly templates-layout-lab.mjs): one new_window
+-- The Rex contract under hub.spawn_window: one new_window
 -- creates a nested layout with depth-first block IDs, its ratios and each leaf's cwd. An invalid
 -- leaf leaves no block and no window.
 test('Rex contract: session.new_window keeps a nested layout; an invalid leaf creates nothing', function()

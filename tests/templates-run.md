@@ -1,8 +1,8 @@
 # Template start engine
 
-Status: the module and controlled recovery tests pass on local Lua 5.5 and Rex
-`0.0.1792158932-g88fd41`. The whole-tab Rex layout probe passes on the same Rex
-build. The production `hub.spawn_window` adapter and combined UI test are pending.
+Status: the controlled engine tests (`tests/engine.lua`) and the real-hub tests in `tests/*.lua`
+pass under `lazyrex-hub test`. The Rex layout contract under `hub.spawn_window` is in
+`tests/start.lua`.
 
 ## Contract
 
@@ -107,22 +107,10 @@ paths. The user path and the agent path always have the same outcome.
 
 ## Verification
 
-Run the controlled tests locally:
+`lazyrex-hub test` runs the controlled tests in `tests/engine.lua` (the cases are in
+`tests/support/engine_cases.lua`), and the real-hub tests in the other `tests/*.lua` files.
 
-```sh
-lua tests/legacy/templates-run.lua "$PWD/templates_run.lua"
-```
-
-Run the same suite in an isolated Rex server:
-
-```sh
-rex -S unix:///tmp/rexlab-templates-codex/rex.sock --autostart=false do \
-  "$PWD/tests/legacy/templates-run.lua" --all \
-  module="$PWD/templates_run.lua"
-node tests/templates-layout-lab.mjs
-```
-
-The sixteen controlled tests cover admission without a side effect, copied inputs,
+The sixteen original controlled tests cover admission without a side effect, copied inputs,
 same-key replay after directory removal, changed-key content, lost admission and
 progress replies, no dispatch before commit, plugin restart after a lost spawn
 reply, pending ordering, partial failure and closure, session uncertainty, and
