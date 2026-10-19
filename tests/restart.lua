@@ -63,9 +63,8 @@ local function session_ids()
   return set
 end
 
--- lab 4 (formerly templates-lab.mjs, TEMPLATES_RESTART=1): the hub crashes after Rex created the
--- first tab and before the hub recorded it. A window hold (docs/testing.md) stops the create
--- there. Until the restart the test asks only Rex: the hub gets no request while it holds a call.
+-- lab 4: the hub crashes after Rex created the first tab and before the hub recorded it. A
+-- window hold (docs/testing.md) stops the create there. Until the restart the test asks only Rex: the hub gets no request while it holds a call.
 -- The hub never adopts accessory panes by their label (decided 2026-10-17), so the run stays
 -- pending with its candidate panes, and Dismiss ends it without closing a pane. The hub replays
 -- the original Start operation after its restart; it must give the same run. A resubmit of that
