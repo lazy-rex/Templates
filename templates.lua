@@ -294,8 +294,11 @@ local function agent_caller(pid)
   if type(pid) ~= 'number' or pid <= 0 or pid % 1 ~= 0 then fail('refused', 'A positive requester PID is required') end
   local r = hub('hub.identify', {pid = pid})
   if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
+  if #r.agent > run_module.MAX_ID then fail('refused', 'The agent ID is too long') end
   local ids = {r.agent}
-  for _, l in ipairs(type(r.legacy) == 'table' and r.legacy or {}) do if type(l) == 'string' and l ~= '' then ids[#ids + 1] = l end end
+  for _, l in ipairs(type(r.legacy) == 'table' and r.legacy or {}) do
+    if type(l) == 'string' and l ~= '' and #l <= run_module.MAX_ID then ids[#ids + 1] = l end
+  end
   return {id = r.agent, ids = ids, session_id = r.session_id, pid = pid}
 end
 local function owns(caller, owner)
@@ -309,6 +312,8 @@ end
 -- equal. op_keys lists the store keys to look up for a caller: one per ID of the agent.
 local function op_keys(kind, caller, key)
   text(key, caller.id == 'user' and 'operation key' or 'key')
+  -- Bounded: dismiss and retry commit the key in the batch of a run record (templates_run.lua).
+  if #key > run_module.MAX_KEY then fail('invalid_input', 'A key is at most ' .. run_module.MAX_KEY .. ' bytes') end
   if caller.id == 'user' then return {kind .. '/' .. part(key)} end
   local list = {}
   for _, id in ipairs(caller.ids) do list[#list + 1] = kind .. '/agent/' .. part(id) .. part(key) end
@@ -517,6 +522,7 @@ end
 local invalidate
 local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = resolve_root, resolve_dir = resolve_dir,
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
+  log = function(line) print('templates: ' .. line) end,
   changed = function() if invalidate then pcall(invalidate) end end})
 local tick_timer
 -- Ticks run outside action handlers. An error stops the loop until the next wake (contract).
@@ -845,7 +851,9 @@ end
 
 -- Dismiss and retry act on one run. The user acts on any run; an agent only on its own.
 local function own_run(caller, id)
-  local run = engine.get(text(id, 'run'))
+  text(id, 'run')
+  if #id > 32 or not id:match('^%d+$') then fail('not_found', 'Template run not found') end
+  local run = engine.get(id)
   if not owns(caller, run.request.by or 'user') then fail('refused', 'Only the user or the agent that started this run can change it') end
   return run
 end

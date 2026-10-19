@@ -37,21 +37,43 @@ local function relative(dir)
     if part == '.' or part == '..' then fail('invalid_input', 'dir cannot contain . or .. segments') end
   end
 end
+-- Size bounds. A run record is written whole in one hub.store.batch, and one control message is
+-- at most 64 KiB (rex-protocol.md, "Rex Lua runtime"). The record grows after admission, so every
+-- field that a later write adds has a bound:
+--   MAX_TEXT: an error text that the run stores (a longer one is cut; the full text goes to the
+--     plugin log through opts.log).
+--   MAX_ID: a session, window, block or grant ID from the hub (a longer one is an invalid result).
+-- Admission computes the record at its final size with these bounds (every tab request and
+-- result, the IDs, an error) and refuses a run over MAX_RUN. The other 2 KiB is the envelope of
+-- the largest write of a run: the client.perform frame (client ID, action, timeout, about 200 B),
+-- the op of the record ("run/" + an ID of at most 32 digits, an if_rev of at most 20 digits), and
+-- the operation that dismiss or retry commits with it (its key is at most MAX_KEY + 2 * MAX_ID +
+-- 32 B, its fingerprint at most 64 B, its result at most 96 B): about 900 B in all.
+local MAX_TEXT, MAX_ID, MAX_KEY = 512, 128, 200
+local MAX_RUN = 62 * 1024
+M.MAX_TEXT, M.MAX_ID, M.MAX_KEY = MAX_TEXT, MAX_ID, MAX_KEY
+-- bounded cuts a text to MAX_TEXT bytes on a UTF-8 character boundary, with "…" at the end, and
+-- replaces control characters with spaces (so its JSON is at most 2 * MAX_TEXT + 2 bytes).
+local function bounded(text)
+  text = tostring(text):gsub('%c', ' ')
+  if #text <= MAX_TEXT then return text end
+  local cut = MAX_TEXT - 3
+  while cut > 0 and text:byte(cut + 1) and text:byte(cut + 1) >= 0x80 and text:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+  return text:sub(1, cut) .. '…'
+end
+M.bounded = bounded
 local function message(err)
   return type(err) == 'table' and (err.message or err.code or 'Request failed') or tostring(err)
 end
--- A run record is written whole in one hub.store.batch, and one control message is at most
--- 64 KiB (rex-protocol.md, "Rex Lua runtime"). The record grows after admission: each tab gets its
--- request (a copy of its layout) and its result. MAX_RUN is the largest record that admission
--- accepts at its final size (an upper bound), with 2 KiB for the batch envelope.
-local MAX_RUN = 62 * 1024
--- encoded_size is an upper bound of the JSON size of v (every character of a string counts as an
--- escape when it needs one; a number counts 24 bytes).
+local function short_id(v) return type(v) == 'string' and v ~= '' and #v <= MAX_ID end
+-- encoded_size is an upper bound of the JSON size of v (a number counts 24 bytes).
 local function encoded_size(v)
   local t = type(v)
   if t == 'string' then
-    local _, special = v:gsub('[%c"\\]', '')
-    return #v + 2 + special * 5
+    -- A control character encodes as \u00XX (6 bytes), a quote or a backslash as 2 bytes.
+    local _, control = v:gsub('%c', '')
+    local _, quoted = v:gsub('["\\]', '')
+    return #v + 2 + control * 5 + quoted
   end
   if t == 'number' then return 24 end
   if t == 'boolean' then return 5 end
@@ -85,6 +107,13 @@ function M.new(opts)
   local resolve_dir = assert(opts.resolve_dir, 'resolve_dir is required')
   local engine, queue, queued, checked = {}, {}, {}, {}
   local scanning, after = false, nil
+  -- note bounds an error text for the run record; the full text goes to the plugin log.
+  local function note(id, text)
+    text = tostring(text)
+    local cut = bounded(text)
+    if cut ~= text and opts.log then pcall(opts.log, 'run ' .. tostring(id) .. ': ' .. text) end
+    return cut
+  end
   local function enqueue(id)
     if not queued[id] then queue[#queue + 1], queued[id] = id, true end
   end
@@ -197,15 +226,15 @@ function M.new(opts)
     for i, tab in ipairs(tabs) do tab.key = 'templates/' .. id .. '/tab/' .. tostring(i) end
     -- Refuse a run that cannot be written at its final size: it would stop at its first update
     -- with a session made and no tab (observed in the lab, tests/limits.lua).
-    local final = copy(run)
-    final.session_id, final.status, final.error = string.rep('x', 48), 'starting', string.rep('x', 200)
-    final.grant_id, final.grant_revoked, final.next_tab = string.rep('x', 64), true, #tabs + 1
+    local final, id_max, text_max = copy(run), string.rep('x', MAX_ID), string.rep('"', MAX_TEXT)
+    final.session_id, final.status, final.error = id_max, 'dismissed', text_max
+    final.dismissed_from, final.grant_id, final.grant_revoked, final.next_tab = 'authorizing', id_max, true, #tabs + 1
     for i, tab in ipairs(final.tabs) do
-      tab.request = {key = tab.key, session = final.session_id, title = tab.title, layout = copy(tab.layout),
-        placement = copy(request.placement), grant_id = final.grant_id}
+      tab.request = {key = tab.key, session = id_max, title = tab.title, layout = copy(tab.layout),
+        placement = copy(request.placement), grant_id = id_max}
       local blocks = {}
-      for b = 1, count_leaves(tab.layout) do blocks[b] = string.rep('x', 48) end
-      final.results[i] = {status = 'open', window_id = string.rep('x', 48), block_ids = blocks, error = string.rep('x', 200)}
+      for b = 1, count_leaves(tab.layout) do blocks[b] = id_max end
+      final.results[i] = {status = 'unknown', window_id = id_max, block_ids = blocks, error = text_max}
     end
     local size = encoded_size(final)
     if size > MAX_RUN then
@@ -252,6 +281,7 @@ function M.new(opts)
   function engine.authorize(id, grant_id)
     text(id, 'run id')
     text(grant_id, 'grant id')
+    if not short_id(grant_id) then fail('invalid_input', 'Invalid grant ID') end
     local run, rev = read('run/' .. id)
     if not run then fail('not_found', 'Template run not found') end
     if run.grant_id ~= nil then
@@ -308,7 +338,7 @@ function M.new(opts)
       if checked[id] then return end
       local grant_id = opts.find_grant and opts.find_grant(copy(run))
       checked[id] = true
-      if grant_id then
+      if short_id(grant_id) then
         run.grant_id = grant_id
         save(run, rev)
         enqueue(id)
@@ -320,7 +350,7 @@ function M.new(opts)
       -- No grant yet (a crash between admission and the grant): find it, or wait for a retry of
       -- the start in a new agent call. Nothing dispatches before it.
       local grant_id = opts.find_grant and opts.find_grant(copy(run))
-      if grant_id then engine.authorize(id, grant_id) return end
+      if short_id(grant_id) then engine.authorize(id, grant_id) return end
       local msg = 'The start is not authorized yet; retry the start with the same key'
       if run.error ~= msg then run.error = msg; save(run, rev) end
       return
@@ -329,11 +359,15 @@ function M.new(opts)
       -- The ensure key and name were committed at admission. Never replace an unknown session.
       local ok, result = pcall(hub, 'hub.session.ensure', {key=run.session_key, name=run.request.new_session_name})
       if not ok then
-        run.status, run.error = 'blocked', message(result)
+        run.status, run.error = 'blocked', note(id, message(result))
         save(run, rev)
         return
       end
-      if type(result.session_id) ~= 'string' or result.session_id == '' then fail('unavailable', 'Invalid session result') end
+      if not short_id(result.session_id) then
+        run.status, run.error = 'blocked', 'Invalid session result; outcome unknown'
+        save(run, rev)
+        return
+      end
       run.session_id, run.status, run.error = result.session_id, 'queued', nil
       save(run, rev)
       enqueue(id)
@@ -351,25 +385,40 @@ function M.new(opts)
       return
     end
     local ok, result = pcall(start_tab, copy(tab.request))
+    -- Only bounded fields of a result are stored (see the size bounds).
+    local stored
+    if ok and type(result) == 'table' then
+      stored = {status = result.status, block_ids = {}}
+      if result.window_id ~= nil then stored.window_id = result.window_id end
+      if result.error ~= nil then stored.error = note(id, result.error) end
+      local blocks = type(result.block_ids) == 'table' and result.block_ids or {}
+      if #blocks > count_leaves(tab.layout) or (stored.window_id ~= nil and not short_id(stored.window_id)) then stored = nil
+      else
+        for i, b in ipairs(blocks) do
+          if not short_id(b) then stored = nil break end
+          stored.block_ids[i] = b
+        end
+      end
+    end
     if not ok then
-      run.status, run.error = 'blocked', message(result)
-    elseif type(result) ~= 'table' then
+      run.status, run.error = 'blocked', note(id, message(result))
+    elseif not stored then
       run.status, run.error = 'blocked', 'Invalid tab start result; outcome unknown'
-    elseif result.status == 'open' then
-      if type(result.window_id) ~= 'string' or result.window_id == '' then
+    elseif stored.status == 'open' then
+      if stored.window_id == nil then
         run.status, run.error = 'blocked', 'Tab start has no window ID; outcome unknown'
       else
-        run.results[run.next_tab] = copy(result)
+        run.results[run.next_tab] = stored
         run.next_tab = run.next_tab + 1
         run.error = nil
         run.status = run.next_tab > #run.tabs and 'open' or 'queued'
       end
-    elseif result.status == 'pending' or result.status == 'unknown' then
-      run.status, run.error = result.status, result.error
-      run.results[run.next_tab] = copy(result)
-    elseif result.status == 'failed' or result.status == 'closed' then
-      run.status, run.error = result.status, result.error or 'Tab start stopped'
-      run.results[run.next_tab] = copy(result)
+    elseif stored.status == 'pending' or stored.status == 'unknown' then
+      run.status, run.error = stored.status, stored.error
+      run.results[run.next_tab] = stored
+    elseif stored.status == 'failed' or stored.status == 'closed' then
+      run.status, run.error = stored.status, stored.error or 'Tab start stopped'
+      run.results[run.next_tab] = stored
     else
       run.status, run.error = 'blocked', 'Unrecognized tab start status; outcome unknown'
     end

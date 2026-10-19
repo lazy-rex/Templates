@@ -80,3 +80,22 @@ test('near the 64 KiB bound both paths open, or both refuse at admission; no run
   expect(seen.open).to_be(true)
   expect(seen.failed).to_be(true)
 end)
+
+-- The reviewer's case: the hub's refusal repeats an 18 000-byte profile name. The run stores a
+-- bounded error, so it stays writable and ends blocked (it can be dismissed).
+test('a long refusal from the hub is stored bounded; the run blocks and can be dismissed', function()
+  local a = agent('alice')
+  local name = 'long-profile'
+  write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'alice',
+    tabs = {{title = 'one', layout = {launch = {profile = string.rep('z', 18000)}, dir = '.'}}}}}})
+  local r = a:call('templates.start', {template = name, root = W.real(W.HOME), key = 'long-profile'})
+  local run = W.wait_run(a, r.run_id, 'blocked')
+  expect(#run.error <= 512).to_be(true)
+  expect(run.error).to_match('…$')
+  expect(a:call('templates.dismiss', {run_id = r.run_id, key = 'long-dismiss'}).status).to_be('dismissed')
+end)
+
+test('keys are bounded: a key over 200 bytes is refused before anything is written', function()
+  local a = agent('alice')
+  expect_error(function() a:call('templates.dismiss', {run_id = '1', key = string.rep('k', 201)}) end, 'invalid_input')
+end)

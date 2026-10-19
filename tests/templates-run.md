@@ -77,6 +77,31 @@ writes all three in one revision-checked batch. The counter produces compact
 decimal IDs without relying on floating-point integer precision. Spawn keys use
 `templates/<id>/tab/<n>` because user-context hub keys are shared across plugins.
 
+## Size bounds
+
+One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The
+engine writes a run record whole in one `hub.store.batch`, and the record grows after admission.
+Every field that a later write adds has a bound:
+
+| Field | Bound | Longer value |
+| --- | --- | --- |
+| An error text (`run.error`, a tab result's `error`) | 512 bytes, control characters replaced with spaces | Cut on a UTF-8 boundary with "…". The full text goes to the plugin log. |
+| A session, window, block or grant ID from the hub | 128 bytes | The result is invalid: the run blocks with a fixed error. |
+| The block IDs of a tab result | The number of leaves of the tab | The result is invalid. |
+| An operation key (agent `key`, UI operation key) | 200 bytes | `invalid_input`; nothing is written. |
+| An agent ID | 128 bytes | `refused` (a longer legacy ID is ignored). |
+| A run ID in a dismiss or retry | 32 digits | `not_found`. |
+
+Admission computes the record at its final size with these bounds (every tab request and result,
+the IDs and an error at their maximum) and refuses a run over 62 KiB with `invalid_input` ("too
+large to start"). It writes nothing then. The other 2 KiB is the envelope of the largest run
+write, about 900 bytes: the `client.perform` frame, the record op (`run/<id>`, `if_rev`), and the
+operation that dismiss or retry commits with the record.
+
+Measured on a lab hub (tests/limits.lua): a run record is about 3 times its template. A template
+of 18 KB in one tab opens on both paths; one of 20 KB in one tab of two panes is refused on both
+paths. The user path and the agent path always have the same outcome.
+
 ## Verification
 
 Run the controlled tests locally:

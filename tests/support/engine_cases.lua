@@ -356,5 +356,24 @@ function tests.admission_refuses_a_run_too_large_at_its_final_size()
   expect_error(function() e.admit(r) end, 'invalid_input')
   assert(f.records['run-counter'] == nil, 'a refused run was admitted')
 end
+function tests.long_errors_are_stored_bounded()
+  local f=fixture(); f.failure='failed'
+  local start=f.start
+  f.start=function(req) local r=start(req); r.error=string.rep('e', 20000) .. '\n'; return r end
+  local e=f.engine(); local run=e.admit(request())
+  drain(e)
+  local got=e.get(run.id)
+  assert(got.status == 'failed' and #got.error <= Run.MAX_TEXT, #got.error)
+  assert(#got.results[1].error <= Run.MAX_TEXT and not got.error:find('%c'))
+end
+function tests.an_oversized_id_from_the_hub_is_an_invalid_result()
+  local f=fixture()
+  local start=f.start
+  f.start=function(req) local r=start(req); r.window_id=string.rep('w', Run.MAX_ID + 1); return r end
+  local e=f.engine(); local run=e.admit(request())
+  drain(e)
+  local got=e.get(run.id)
+  assert(got.status == 'blocked' and got.error:find('Invalid tab start result', 1, true), got.status)
+end
 return tests
 end
