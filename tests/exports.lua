@@ -59,15 +59,24 @@ test('agent and UI keys are separate: two agents and a crafted UI key use one ke
   expect(names['k-user']).to_be('user')
 end)
 
-test('delete: an agent deletes only its own templates; the user deletes any', function()
+test('delete: an agent deletes any template, also one that another agent saved', function()
   local alice, bob = agent('alice'), agent('bob')
   local s, root = workspace()
   capture(alice, s)
   alice:call('templates.save', {name = 'd-alice', root = root, session_id = s, key = 'd1'})
   alice:call('templates.save', {name = 'd-alice-2', root = root, session_id = s, key = 'd2'})
-  expect_error(function() bob:call('templates.delete', {template = 'd-alice', key = 'del-1'}) end, 'refused')
-  expect(alice:call('templates.delete', {template = 'd-alice', key = 'del-1'})).to_equal({})
-  expect(alice:call('templates.delete', {template = 'd-alice', key = 'del-1'})).to_equal({})
+  expect(bob:call('templates.delete', {template = 'd-alice', key = 'del-1'})).to_equal({})
+  -- A replay after alice saved the name again answers the same and keeps the new template.
+  alice:call('templates.save', {name = 'd-alice', root = root, session_id = s, key = 'd3'})
+  expect(bob:call('templates.delete', {template = 'd-alice', key = 'del-1'})).to_equal({})
+  expect(find(alice:call('templates.list', {}).templates, 'name', 'd-alice').saved_by).to_be('alice')
+  expect(alice:call('templates.delete', {template = 'd-alice', key = 'del-2'})).to_equal({})
+  -- A template that the user saved (and one from before saved_by) is an agent's to delete too.
+  write({{key = 'template/' .. W.hex('d-user'), value = {v = 1, name = 'd-user', saved_by = 'user', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}},
+    {key = 'template/' .. W.hex('d-old'), value = {v = 1, name = 'd-old', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  expect(bob:call('templates.delete', {template = 'd-user', key = 'del-user'})).to_equal({})
+  expect(bob:call('templates.delete', {template = 'd-old', key = 'del-old'})).to_equal({})
+  expect(find(alice:call('templates.list', {}).templates, 'name', 'd-user')).to_be(nil)
   local p = panel(s)
   local tree = p:render()
   -- The panel lists the remaining template by its name, with Delete.
@@ -121,7 +130,7 @@ test('the user starts through the form into a new session', function()
   wait_run(alice, run.id, 'open')
 end)
 
-test('dismiss and retry: an agent acts on its own runs; the user on any', function()
+test('dismiss and retry: an agent acts on another agent\'s run; the run stays that agent\'s', function()
   local alice, bob = agent('alice'), agent('bob')
   local s, root = workspace()
   capture(alice, s)
@@ -129,15 +138,27 @@ test('dismiss and retry: an agent acts on its own runs; the user on any', functi
   -- A session that does not exist blocks the first tab.
   local a = alice:call('templates.start', {template = 'never', root = root, session_id = 'session:00000000-0000-0000-0000-000000000000', key = 'sk-1'})
   wait_run(alice, a.run_id, 'blocked')
-  expect_error(function() bob:call('templates.retry', {run_id = a.run_id, key = 'r1'}) end, 'refused')
-  expect_error(function() bob:call('templates.dismiss', {run_id = a.run_id, key = 'x1'}) end, 'refused')
-  local retried = alice:call('templates.retry', {run_id = a.run_id, key = 'r1'})
+  local grant_id = store('run/' .. a.run_id).value.grant_id
+  expect(type(grant_id)).to_be('string')
+  local retried = bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})
   expect(retried).to_equal({run_id = a.run_id, woken = true})
-  expect(alice:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
+  expect(bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
+  -- The run stays alice's, with her grant.
+  expect(store('run/' .. a.run_id).value.request.by).to_be('alice')
+  expect(store('run/' .. a.run_id).value.grant_id).to_be(grant_id)
   -- The retry queued the run; it blocks again (the session does not exist).
   wait_run(alice, a.run_id, 'blocked')
-  expect(alice:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
-  expect(alice:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
+  expect(bob:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
+  expect(bob:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
+  -- A replay of bob's retry after the dismiss answers the same and wakes nothing.
+  expect(bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
+  expect(store('run/' .. a.run_id).value.status).to_be('dismissed')
+  -- The user's stuck run: an agent dismisses it.
+  write({{key = 'run/990', value = {id = '990', status = 'blocked', next_tab = 1, root = root, results = {}, session_key = 'templates/990/session',
+    tabs = {{key = 'templates/990/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
+    request = {key = 'k990', root = root, new_session_name = 'u990', template = {v = 1, name = 'u990', tabs = {}}}}}})
+  expect(bob:call('templates.dismiss', {run_id = '990', key = 'x-user'})).to_equal({run_id = '990', status = 'dismissed'})
+  expect(store('run/990').value.request.by).to_be(nil)
   -- The user: Retry and Dismiss rows of another agent's stuck run in the panel.
   local b = alice:call('templates.start', {template = 'never', root = root, session_id = 'session:00000000-0000-0000-0000-000000000000', key = 'sk-2'})
   wait_run(alice, b.run_id, 'blocked')

@@ -287,8 +287,9 @@ end
 
 -- Callers (agent parity). The UI user acts through views; an agent through a forwarded export
 -- (hub.forward), identified by the hub from its pane. caller = {id, ids, session_id, pid}: ids
--- are every ID of the agent (its identity and the legacy IDs it took over), so an operation or an
--- owner recorded under an older ID still matches.
+-- are every ID of the agent (its identity and the legacy IDs it took over), so an operation
+-- recorded under an older ID still matches. An agent may act on anything that the user can
+-- (LazyRex decisions.md, 2026-10-19): there is no owner check.
 local USER = {id = 'user', ids = {'user'}}
 local function agent_caller(pid)
   if type(pid) ~= 'number' or pid <= 0 or pid % 1 ~= 0 then fail('refused', 'A positive requester PID is required') end
@@ -304,11 +305,6 @@ local function agent_caller(pid)
     if #id > run_module.MAX_ID or id:find('%c') then fail('refused', 'An ID of this agent is longer than ' .. run_module.MAX_ID .. ' bytes or has control characters') end
   end
   return {id = r.agent, ids = ids, session_id = r.session_id, pid = pid}
-end
-local function owns(caller, owner)
-  if caller.id == 'user' then return true end
-  for _, id in ipairs(caller.ids) do if id == owner then return true end end
-  return false
 end
 
 -- Operation keys. The UI keeps its key format: '<kind>/' .. part(view key) (part starts with a
@@ -427,7 +423,7 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill)
     if layout then tabs[#tabs + 1] = {title = tab.title, layout = layout} end
   end
   if #tabs == 0 then fail('invalid_input', 'The template has no panes') end
-  -- saved_by: who may delete it. An agent deletes only its own templates; the user any.
+  -- saved_by: who saved it (information only; anyone may delete it).
   local template = {v = 1, name = name, tabs = tabs, saved_by = caller.id}
   local tkey = template_key(name)
   local existing = hub('hub.store.get', {keys = {tkey}}).records[tkey]
@@ -843,33 +839,30 @@ local function render(args)
 end
 
 -- Delete: the deletion and its result commit together; a retry never deletes a newer template.
--- The operation answers first, then the owner check: an agent deletes only templates it saved;
--- the user any (a template from before saved_by has no owner: the user's only).
+-- The operation answers first. An agent deletes any template, as the user does.
 local function delete_core(caller, keys, name)
   local fingerprint = 'delete-v1/' .. part(tostring(name))
   local prior = prior_op(keys, fingerprint)
   if prior then return prior end
   local tpl, rev, tkey = load_template(name)
-  if not owns(caller, tpl.saved_by or 'user') then fail('refused', 'Only the user or the agent that saved "' .. name .. '" can delete it') end
   local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = rev, delete = true}}, op = {key = keys[1], fingerprint = fingerprint, result = {}}})
   if stored.op_exists then return prior_op(keys, fingerprint) end
   if stored.conflict then fail('conflict', 'The template changed; try again') end
   return {}
 end
 
--- Dismiss and retry act on one run. The user acts on any run; an agent only on its own.
-local function own_run(caller, id)
+-- Dismiss and retry act on one run, from the user or any agent. An agent's run still dispatches
+-- only with its own grant (find_grant), whoever retries it.
+local function find_run(id)
   text(id, 'run')
   if #id > 32 or not id:match('^%d+$') then fail('not_found', 'Template run not found') end
-  local run = engine.get(id)
-  if not owns(caller, run.request.by or 'user') then fail('refused', 'Only the user or the agent that started this run can change it') end
-  return run
+  return engine.get(id)
 end
 local function dismiss_core(caller, keys, id)
   local fingerprint = 'dismiss-v1/' .. part(tostring(id))
   local prior = prior_op(keys, fingerprint)
   if prior then return prior end
-  own_run(caller, id)
+  find_run(id)
   -- The dismissed state and the operation result commit in one batch (engine.dismiss).
   local ok, err = pcall(engine.dismiss, id, {key = keys[1], fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
   if not ok then
@@ -889,7 +882,7 @@ local function retry_core(caller, keys, id)
     if prior.woken then engine.wake_one(id); pump() end
     return prior
   end
-  own_run(caller, id)
+  find_run(id)
   local ok, result = pcall(engine.retry, id, {key = keys[1], fingerprint = fingerprint})
   if not ok then
     if type(result) == 'table' and result.code == 'op_exists' then return retry_core(caller, keys, id) end
@@ -1002,13 +995,13 @@ local exports = {
     description = 'List template starts, newest first: id, template, root, status (authorizing, queued, starting, pending, unknown, blocked, open, failed, closed, dismissed), tabs, error, by and session_id.',
     args = {type = 'object', properties = {}, additionalProperties = false}},
   {name = 'templates.delete', title = 'Delete a session template',
-    description = 'Delete a template that you saved.',
+    description = 'Delete a template, also one that the user or another agent saved.',
     args = {type = 'object', properties = {template = {type = 'string', minLength = 1}, key = key_arg}, required = {'template', 'key'}, additionalProperties = false}},
   {name = 'templates.dismiss', title = 'Dismiss a template start',
-    description = 'Stop the rest of a start of yours that is pending, unknown, blocked or not authorized. It closes no pane.',
+    description = 'Stop the rest of a start that is pending, unknown, blocked or not authorized, also a start of the user or another agent. It closes no pane.',
     args = {type = 'object', properties = {run_id = {type = 'string', minLength = 1}, key = key_arg}, required = {'run_id', 'key'}, additionalProperties = false}},
   {name = 'templates.retry', title = 'Retry a template start',
-    description = 'Try a blocked start of yours again now.',
+    description = 'Try a blocked start again now, also a start of the user or another agent. An agent\'s start still opens its tabs as that agent.',
     args = {type = 'object', properties = {run_id = {type = 'string', minLength = 1}, key = key_arg}, required = {'run_id', 'key'}, additionalProperties = false}},
 }
 

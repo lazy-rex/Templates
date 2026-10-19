@@ -156,8 +156,7 @@ end)
 -- so her identity takes over the legacy ID "alice" (a real alias). Her start and its grant belong
 -- to the current identity. Then the run's record is rewritten to the state of a crash between the
 -- grant and engine.authorize, with request.by set to the legacy ID. Resume finds the grant by its
--- key and exact requests (find_grant), and the tabs open as the grant's agent. The current
--- identity still owns the run (through its legacy ID); another agent cannot change it.
+-- key and exact requests (find_grant), and the tabs open as the grant's agent.
 test('constructed boundary: a run with a legacy owner and no recorded grant resumes with its grant', function()
   local alice, bob = agent('alice'), agent('bob')
   local _, root = saved_template(alice, 'legacy-owner')
@@ -179,7 +178,7 @@ test('constructed boundary: a run with a legacy owner and no recorded grant resu
   local panes = workers_in(alice, opened.session_id)
   expect(#panes).to_be(3)
   for _, w in ipairs(panes) do expect(w.parent).to_be(current) end
+  -- Any agent may retry; an open run is not woken.
   expect(alice:call('templates.retry', {run_id = id, key = 'owner-retry'})).to_equal({run_id = id, woken = false})
-  expect_error(function() bob:call('templates.dismiss', {run_id = id, key = 'bob-dismiss'}) end, 'refused')
-  expect_error(function() bob:call('templates.retry', {run_id = id, key = 'bob-retry'}) end, 'refused')
+  expect(bob:call('templates.retry', {run_id = id, key = 'bob-retry'})).to_equal({run_id = id, woken = false})
 end)
