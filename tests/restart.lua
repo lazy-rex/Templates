@@ -152,9 +152,9 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   local panes = workers_in(alice, run.session_id)
   expect(#panes).to_be(3)
   for _, w in ipairs(panes) do expect(w.parent).to_be('alice') end
-  -- Only the owner stops a pane.
-  expect_error(function() bob:hub('hub.stop', {spawn_id = panes[1].spawn_id}) end, 'did not start')
-  expect(alice:hub('hub.stop', {spawn_id = panes[1].spawn_id}).status).to_be('closed')
+  -- Any agent stops a pane (LazyRex decisions.md, 2026-10-19); the pane stays alice's.
+  expect(bob:hub('hub.stop', {spawn_id = panes[1].spawn_id}).status).to_be('closed')
+  expect(alice:hub('hub.stop', {spawn_id = panes[2].spawn_id}).status).to_be('closed')
   wait('the revoke of the grant', function() return store('run/' .. id).value.grant_revoked == true end, 20)
 end)
 
