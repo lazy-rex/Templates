@@ -70,6 +70,8 @@ test('delete: an agent deletes only its own templates; the user deletes any', fu
   expect(alice:call('templates.delete', {template = 'd-alice', key = 'del-1'})).to_equal({})
   local p = panel(s)
   local tree = p:render()
+  -- The panel lists the remaining template by its name, with Delete.
+  expect(node(tree, 'templates').items[1].label).to_be('d-alice-2')
   expect(node(tree, 'templates').items[1].action.tool).to_be('templates.delete')
   expect(p:action('templates', 'delete', {item_id = 'd-alice-2'}, 'ui-del-1').status).to_be('succeeded')
   local list = alice:call('templates.list', {}).templates
