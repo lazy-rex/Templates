@@ -62,28 +62,34 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   wait('the revoke of the grant', function() return store('run/' .. id).value.grant_revoked == true end, 20)
 end)
 
--- A constructed recovery boundary, not an observed live migration: the run's record is rewritten
--- to the state of a crash between the grant and engine.authorize, with request.by set to an older
--- ID of the agent (an identity can take over a legacy ID after admission). The grant was made by
--- the agent's current ID. Resume finds the grant by its key and exact requests (find_grant), and
--- the tabs open as the grant's agent. Another agent cannot change the run.
+-- A constructed recovery boundary, not an observed live migration. alice reports a conversation,
+-- so her identity takes over the legacy ID "alice" (a real alias). Her start and its grant belong
+-- to the current identity. Then the run's record is rewritten to the state of a crash between the
+-- grant and engine.authorize, with request.by set to the legacy ID. Resume finds the grant by its
+-- key and exact requests (find_grant), and the tabs open as the grant's agent. The current
+-- identity still owns the run (through its legacy ID); another agent cannot change it.
 test('constructed boundary: a run with a legacy owner and no recorded grant resumes with its grant', function()
   local alice, bob = agent('alice'), agent('bob')
   local _, root = saved_template(alice, 'legacy-owner')
+  local current = alice:report({kind = 'claude', conversation_id = 'legacy-boundary'}).identity
+  expect(current).not_to_be('alice')
   local id, held = hold(1)
   local r = alice:call('templates.start', {template = 'legacy-owner', root = root, key = 'legacy-start'})
   held()
   local run = store('run/' .. id).value
+  expect(run.request.by).to_be(current)
   local grant_id = run.grant_id
   expect(type(grant_id)).to_be('string')
-  run.grant_id, run.status, run.request.by = nil, 'authorizing', 'claude:legacy-alice'
+  run.grant_id, run.status, run.request.by = nil, 'authorizing', 'alice'
   write({{key = 'run/' .. id, value = run}})
   hub:restart({crash = true})
   local opened = W.wait_run(alice, r.run_id, 'open')
   expect(store('run/' .. id).value.grant_id).to_be(grant_id)
+  expect(store('run/' .. id).value.request.by).to_be('alice')
   local panes = workers_in(alice, opened.session_id)
   expect(#panes).to_be(3)
-  for _, w in ipairs(panes) do expect(w.parent).to_be('alice') end
+  for _, w in ipairs(panes) do expect(w.parent).to_be(current) end
+  expect(alice:call('templates.retry', {run_id = id, key = 'owner-retry'})).to_equal({run_id = id, woken = false})
   expect_error(function() bob:call('templates.dismiss', {run_id = id, key = 'bob-dismiss'}) end, 'refused')
   expect_error(function() bob:call('templates.retry', {run_id = id, key = 'bob-retry'}) end, 'refused')
 end)

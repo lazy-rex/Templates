@@ -157,10 +157,16 @@ test('Rex contract: session.new_window keeps a nested layout; an invalid leaf cr
     expect(b.label).to_be(l)
     expect(cwd(s, created.block_ids[i])).to_be(dirs[l])
   end
-  local before = #W.blocks(s)
+  local function block_set()
+    local ids = {}
+    for _, b in ipairs(W.blocks(s)) do ids[#ids + 1] = b.block_id end
+    table.sort(ids)
+    return ids
+  end
+  local before = block_set()
   local _, err = rex.call('session.new_window', {session_id = s, window_label = 'invalid',
     layout = W.HS(0.5, leaf('a'), {block = {flavor = 'invalid.templates.flavor'}})})
   expect(err ~= nil).to_be(true)
-  expect(#W.blocks(s)).to_be(before)
+  expect(block_set()).to_equal(before)
   expect(#view(s).windows).to_be(2)
 end)

@@ -200,3 +200,32 @@ for _, case in ipairs({{'F7 a legacy start record without at', function(v) v.at 
     a:close()
   end)
 end
+
+-- The same operation again: a hub restart while the form waits. The hub runs the operation of
+-- the same key again, so the plugin is called with it again. The start replays the same run, and
+-- the operation decides once. The decision depends on timing: done (the app is asked once) when
+-- the replay runs within the switch wait with the app shown again, else a refusal (timeout, or
+-- no_app when it runs before the test shows the app again) with no ask. Nothing asks it later.
+test('F1 a hub restart while the form waits: the same operation replays the run and decides once', function()
+  local c = prepare()
+  local id = W.next_run_id()
+  local inj = inject({match = {updates = 'run/' .. id}, fail = 'held by the test', times = 'always'})
+  local _, key = c.form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = c.values}, operation_key = c.key})
+  wait('the held update', function() return injection(inj).consumed >= 1 end, 10)
+  hub:restart() -- ends the hold (injections are hub state)
+  local a = app('sw-app-r', {sessions = {c.s}})
+  local op = wait('the operation after the restart', function()
+    local o = operation(key)
+    return o.status ~= 'pending' and o or nil
+  end, 30)
+  expect(op.status).to_be('succeeded')
+  expect(op.result.run_id).to_be(id)
+  W.wait_run(alice, id, 'open')
+  local sw = W.switch_record(c.key)
+  local asked = sw.state == 'done' and 1 or 0
+  if asked == 0 then expect(sw.state).to_be('refused') end
+  expect(#a:calls()).to_be(asked)
+  rex.sleep(1)
+  expect(#a:calls()).to_be(asked)
+  a:close()
+end)
