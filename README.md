@@ -54,7 +54,8 @@ The lab server alone is not enough. Before the test, prepare the lab:
    ]}
    ```
 5. Start the hub from `$TEMPLATES_LAB`: `./hub -config hub.json`. Set `REX_SERVER` to the lab
-   socket, so that panes that the hub starts reach the lab server and not your own.
+   socket in its environment, and unset `REX_SESSION` and `REX_BLOCK`. The test starts the hub
+   the same way when it restarts it.
    The test needs `sqlite3` to read `$TEMPLATES_LAB/hubstate/hub.db`.
 
 Then run:
