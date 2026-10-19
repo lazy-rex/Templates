@@ -1,62 +1,9 @@
 -- Agent exports and their UI actions: each flow runs on both paths (agent(...):call, the MCP path,
 -- and the user's view). Owner rules, key namespaces and the grant of an agent's start.
 
-local HOME = H.args.lab .. '/home'
-
--- A source session: tab "code" splits two idle shells (api, web), tab "logs" has one (the root).
-local function sh(cwd)
-  return {block = {flavor = 'com.superlogical.terminal.shell', options = {command = {'/bin/sh'}, login = false, cwd = cwd}}}
-end
-local n = 0
-local function workspace()
-  n = n + 1
-  local root = HOME .. '/ws' .. n
-  local made, err = rex.exec({'mkdir', '-p', root .. '/api', root .. '/web'})
-  if not made or not made.ok then error('mkdir: ' .. tostring(err or made.stderr)) end
-  -- The real path: the lab's TMPDIR can be a symbolic link (/tmp on macOS).
-  root = rex.exec({'pwd', '-P'}, {cwd = root}).stdout:gsub('\n$', '')
-  local res, err = rex.call('session.create', {label = 'ws' .. n, initial_windows = {
-    {window_label = 'code', layout = {split = {direction = 'horizontal', ratio = 0.4, before = sh(root .. '/api'), after = sh(root .. '/web')}}},
-    {window_label = 'logs', layout = sh(root)}}})
-  if err then error(err.message or tostring(err)) end
-  return res.session_id, root
-end
--- capture waits until every pane of the session is an idle shell with a known directory.
-local function capture(a, session_id)
-  return wait('the capture of ' .. session_id, function()
-    local c = a:call('templates.capture', {session_id = session_id})
-    if #c.panes ~= 3 then return nil end
-    for _, p in ipairs(c.panes) do if p.guess ~= 'shell' or not p.dir then return nil end end
-    return c
-  end, 20)
-end
--- panel opens the Templates panel from a pane of the session, as the palette command does.
-local function panel(session_id)
-  user:command('templates', {session = session_id, block = rex.call('session.list_blocks', {session_id = session_id}).blocks[1].block_id})
-  return user:view('/panels/templates', nil, session_id)
-end
-local function first_block(session_id)
-  return rex.call('session.list_blocks', {session_id = session_id}).blocks[1].block_id
-end
-local function form_input(tree, id)
-  local values = {}
-  for _, f in ipairs(node(tree, id).fields) do values[f.id] = f.value end
-  return values
-end
-local function find(list, field, value)
-  for _, x in ipairs(list) do if x[field] == value then return x end end
-end
-local function run_of(a, id)
-  local r = a:call('templates.runs', {})
-  if type(r.runs) ~= 'table' then error('templates.runs: ' .. rex.json.encode(r)) end
-  return find(r.runs, 'id', id)
-end
-local function wait_run(a, id, status)
-  return wait('run ' .. id .. ' ' .. status, function()
-    local r = run_of(a, id)
-    return r and r.status == status and r or nil
-  end, 30)
-end
+local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
+local workspace, capture, first_block, panel, form_input, find, run_of, wait_run =
+  W.workspace, W.capture, W.first_block, W.panel, W.form_input, W.find, W.run_of, W.wait_run
 
 test('an agent saves a session; a retry replays; other content with the key is a conflict', function()
   local alice = agent('alice')
@@ -104,7 +51,7 @@ test('agent and UI keys are separate: two agents and a crafted UI key use one ke
   local form = user:view('/forms/save', nil, s)
   local values = form_input(form:render(), 'save_template')
   values.name, values.root = 'k-user', root
-  expect(form:action('save_template', 'submit', {values = values}, 'agent/5alice6shared').status).to_be('succeeded')
+  expect(form:action('save_template', 'submit', {values = values}, 'agent/5:alice6:shared').status).to_be('succeeded')
   local names = {}
   for _, t in ipairs(alice:call('templates.list', {}).templates) do names[t.name] = t.saved_by end
   expect(names['k-alice']).to_be('alice')
@@ -185,6 +132,8 @@ test('dismiss and retry: an agent acts on its own runs; the user on any', functi
   local retried = alice:call('templates.retry', {run_id = a.run_id, key = 'r1'})
   expect(retried).to_equal({run_id = a.run_id, woken = true})
   expect(alice:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
+  -- The retry queued the run; it blocks again (the session does not exist).
+  wait_run(alice, a.run_id, 'blocked')
   expect(alice:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
   expect(alice:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
   -- The user: Retry and Dismiss rows of another agent's stuck run in the panel.
@@ -198,6 +147,7 @@ test('dismiss and retry: an agent acts on its own runs; the user on any', functi
   expect(retry.action.tool).to_be('templates.retry')
   expect(find(items, 'id', 'dismiss:' .. b.run_id).action.tool).to_be('templates.dismiss')
   expect(p:action('stuck', 'retry', {item_id = 'retry:' .. b.run_id}, 'ui-r1').status).to_be('succeeded')
+  wait_run(alice, b.run_id, 'blocked')
   expect(p:action('stuck', 'dismiss', {item_id = 'dismiss:' .. b.run_id}, 'ui-x1').status).to_be('succeeded')
   expect(run_of(alice, b.run_id).status).to_be('dismissed')
 end)
@@ -207,4 +157,49 @@ test('only the hub calls the plugin; a forward of a name that is not exported is
   expect_error(function() user:plugin_view('render', {route = '/panels/templates'}) end, 'refused')
   expect_error(function() alice:direct('hub.forward', {action = 'templates.list', args = {}, requester_pid = 1}) end, 'refused')
   expect_error(function() alice:direct('templates.list', {}) end, 'refused')
+end)
+
+-- The reviewer's cases (2da0f11 review). A template that alice saved, started into a session that
+-- does not exist, so its first tab blocks.
+local function seed_blocked()
+  write({{key = 'template/726576696577', value = {v = 1, name = 'review', saved_by = 'alice',
+    tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+end
+local function blocked_args(key)
+  return {template = 'review', root = H.args.lab .. '/home', session_id = 'session:00000000-0000-0000-0000-000000000000', key = key}
+end
+
+test('a retry whose reply was lost: the replay recovers the queued run and retries nothing twice', function()
+  seed_blocked()
+  local a = agent('alice')
+  local r = a:call('templates.start', blocked_args('retry-start'))
+  wait('blocked', function() return store('run/' .. r.run_id).value.status == 'blocked' end)
+  rex.sleep(1)
+  local run = store('run/' .. r.run_id).value
+  run.error = 'the retry has not run'
+  write({{key = 'run/' .. r.run_id, value = run}})
+  with_injection({match = {op_prefix = 'retry/agent/'}, replay = true, fail = 'lost retry reply'}, 1, function()
+    expect_error(function() a:call('templates.retry', {run_id = r.run_id, key = 'retry-lost'}) end, 'lost retry reply')
+  end)
+  expect(a:call('templates.retry', {run_id = r.run_id, key = 'retry-lost'}).woken).to_be(true)
+  wait('the queued run ran', function()
+    local v = store('run/' .. r.run_id).value
+    return v.status == 'blocked' and v.error ~= 'the retry has not run'
+  end, 20)
+  -- The run is stuck again: a replay of the same retry does not dispatch it again.
+  local stuck = store('run/' .. r.run_id)
+  expect(a:call('templates.retry', {run_id = r.run_id, key = 'retry-lost'}).woken).to_be(true)
+  rex.sleep(1)
+  expect(store('run/' .. r.run_id).rev).to_be(stuck.rev)
+end)
+
+test('start refuses a key that two IDs of one agent used, after the identities merge', function()
+  seed_blocked()
+  local a, b = agent('alice'), agent('bob')
+  a:report({kind = 'claude', conversation_id = 'review-alias'})
+  local one = a:call('templates.start', blocked_args('both'))
+  local two = b:call('templates.start', blocked_args('both'))
+  expect(one.run_id).not_to_be(two.run_id)
+  b:report({kind = 'claude', conversation_id = 'review-alias'})
+  expect_error(function() b:call('templates.start', blocked_args('both')) end, 'conflict')
 end)

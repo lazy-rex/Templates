@@ -502,11 +502,15 @@ local function grant_entries(run)
   return entries
 end
 local function grant_key(run) return 'run/' .. run.id end
--- find_grant (engine recovery): the grant of this run if the hub has it, active, for the run's
--- agent and with exactly the run's requests. It never creates one: that needs the agent's call.
+-- find_grant (engine recovery): the grant of this run if the hub has it, active and with exactly
+-- the run's requests. It never creates one: that needs the agent's call. The agent is not compared:
+-- the grant's agent can be a later ID of the run's agent (an identity that took over request.by),
+-- and the plugin can identify only a caller, not an ID. The grant key run/<id> is the plugin's own
+-- (the hub scopes grant keys to the plugin), and start_core creates it only in a call that
+-- replays this run's operation key, which only the run's agent (any of its IDs) can do.
 local function find_grant(run)
   local g = hub('hub.grant.get', {key = grant_key(run)})
-  if not g.found or g.state ~= 'active' or g.agent ~= run.request.by then return nil end
+  if not g.found or g.state ~= 'active' then return nil end
   if canon(g.entries) ~= canon(grant_entries(run)) then return nil end
   return g.grant_id
 end
@@ -626,11 +630,18 @@ local function start_core(caller, key, fingerprint, intent)
     if stored.conflict then fail('conflict', 'This start is being submitted twice; retry with the same key') end
   end
   local run = engine.admit(request)
-  if run.request.by and run.grant_id == nil and run.status == 'authorizing' then
-    if not caller.pid then fail('refused', 'Only the agent that started the run can authorize it') end
-    local g = hub('hub.grant.create', {on_behalf = caller.pid, key = grant_key(run), entries = grant_entries(run)})
-    if g.state ~= 'active' then fail('conflict', 'The grant of this start was revoked') end
-    run = engine.authorize(run.id, g.grant_id)
+  if run.request.by and run.grant_id == nil then
+    if run.status == 'authorizing' then
+      if not caller.pid then fail('refused', 'Only the agent that started the run can authorize it') end
+      local g = hub('hub.grant.create', {on_behalf = caller.pid, key = grant_key(run), entries = grant_entries(run)})
+      if g.state ~= 'active' then fail('conflict', 'The grant of this start was revoked') end
+      run = engine.authorize(run.id, g.grant_id)
+    else
+      -- The run ended (dismissed) before it recorded its grant. A grant made by an earlier call
+      -- is recorded now, so the engine revokes it. Nothing dispatches: the run is finished.
+      local grant_id = find_grant(run)
+      if grant_id then run = engine.authorize(run.id, grant_id) end
+    end
   end
   pump()
   return request, run, at
@@ -673,13 +684,20 @@ local function agent_start(caller, args)
   local fingerprint = 'start-agent-v1/' .. canon({template = args.template, root = args.root,
     session_id = args.session_id or false, new_session = args.new_session or false})
   local keys = op_keys('start', caller, args.key)
-  -- A start of another ID of this agent with this key is the same operation (its record).
-  local key = keys[1]
-  for _, k in ipairs(keys) do
-    local rk = 'start-form/' .. hex(k)
-    local r = hub('hub.store.get', {keys = {rk}}).records[rk]
-    if r and r.value ~= nil then key = k; break end
+  -- A start of another ID of this agent with this key is the same operation (its record). Two IDs
+  -- that both started with the key are a conflict, also with equal arguments (prior_op).
+  local key, found = keys[1], 0
+  local records = {}
+  for _, k in ipairs(keys) do records[#records + 1] = 'start-form/' .. hex(k) end
+  local got = hub('hub.store.get', {keys = records}).records
+  for i, k in ipairs(keys) do
+    local r = got[records[i]]
+    if r and r.value ~= nil then
+      found = found + 1
+      if found == 1 then key = k end
+    end
   end
+  if found > 1 then fail('conflict', 'Two IDs of this agent used the key; use a new key') end
   local _, run = start_core(caller, key, fingerprint, {template = args.template, root = args.root,
     session_id = args.session_id, new_session_name = args.new_session})
   return {run_id = run.id}
@@ -837,22 +855,31 @@ local function dismiss_core(caller, keys, id)
   if prior then return prior end
   own_run(caller, id)
   -- The dismissed state and the operation result commit in one batch (engine.dismiss).
-  engine.dismiss(id, {key = keys[1], fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
+  local ok, err = pcall(engine.dismiss, id, {key = keys[1], fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
+  if not ok then
+    if type(err) == 'table' and err.code == 'op_exists' then return prior_op(keys, fingerprint) end
+    error(err, 0)
+  end
   pump()
   return {run_id = id, status = 'dismissed'}
 end
--- Retry wakes one run now. The engine retries every unfinished run at each start of the plugin
--- (engine.resume), so a crash after the saved result loses no work, and a repeated wake only
--- repeats idempotent tab requests. The saved result answers a replay without a second wake.
+-- Retry queues a stuck run again. The queued state commits with the operation (engine.retry), so
+-- a lost reply loses no retry. A replay answers from the saved operation and schedules the run
+-- (wake_one): a queued run dispatches, and a run that is stuck again is not retried again.
 local function retry_core(caller, keys, id)
   local fingerprint = 'retry-v1/' .. part(tostring(id))
   local prior = prior_op(keys, fingerprint)
-  if prior then return prior end
-  local run = own_run(caller, id)
-  local result = {run_id = id, woken = run.status == 'blocked' or run.status == 'pending' or run.status == 'unknown'}
-  local stored = hub('hub.store.batch', {ops = {}, op = {key = keys[1], fingerprint = fingerprint, result = result}})
-  if stored.op_exists then return prior_op(keys, fingerprint) end
-  if result.woken then engine.wake_one(id); pump() end
+  if prior then
+    if prior.woken then engine.wake_one(id); pump() end
+    return prior
+  end
+  own_run(caller, id)
+  local ok, result = pcall(engine.retry, id, {key = keys[1], fingerprint = fingerprint})
+  if not ok then
+    if type(result) == 'table' and result.code == 'op_exists' then return retry_core(caller, keys, id) end
+    error(result, 0)
+  end
+  pump()
   return result
 end
 

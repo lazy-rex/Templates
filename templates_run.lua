@@ -48,6 +48,9 @@ end
 local function by_agent(run) return run.request.by ~= nil and run.request.by ~= 'user' end
 -- A finished agent run gives its grant back (hub.grant.revoke) after its final state commits.
 local function owes_revoke(run) return finished(run) and run.grant_id ~= nil and not run.grant_revoked end
+-- A grant can commit in the hub before the run records it (a lost reply or a crash before
+-- engine.authorize). A finished agent run without a grant ID looks for it once, to revoke it.
+local function owes_grant_check(run) return finished(run) and by_agent(run) and run.grant_id == nil and not run.grant_checked end
 
 function M.new(opts)
   local hub = assert(opts.hub, 'hub is required')
@@ -67,6 +70,8 @@ function M.new(opts)
   end
   local function batch(ops, op)
     local result = hub('hub.store.batch', {ops = ops, op = op})
+    -- The caller answers from the saved operation (another call saved it first).
+    if result.op_exists then fail('op_exists', 'The operation is already saved') end
     if result.conflict then fail('conflict', 'Template run changed; retry with the same key') end
     if not result.revs then fail('unavailable', 'Invalid store batch result') end
   end
@@ -195,7 +200,7 @@ function M.new(opts)
     end
     run.dismissed_from, run.status = run.status, 'dismissed'
     save(run, rev, op)
-    if owes_revoke(run) then enqueue(id) end
+    if owes_revoke(run) or owes_grant_check(run) then enqueue(id) end
     return copy(run)
   end
 
@@ -217,10 +222,30 @@ function M.new(opts)
     return copy(run)
   end
 
-  -- wake_one schedules one run now (Retry). A finished run is not scheduled.
+  -- retry queues a blocked, pending or unknown run again. The queued state and the operation
+  -- (op = {key, fingerprint, result}; result.woken is set here) commit in one batch, so a lost
+  -- reply cannot lose the retry: the run is queued durably, and any wake dispatches it.
+  function engine.retry(id, op)
+    text(id, 'run id')
+    local run, rev = read('run/' .. id)
+    if not run then fail('not_found', 'Template run not found') end
+    local woken = run.status == 'blocked' or run.status == 'pending' or run.status == 'unknown'
+    op.result = {run_id = id, woken = woken}
+    if not woken then
+      batch({}, op)
+      return op.result
+    end
+    run.status, run.error = 'queued', nil
+    save(run, rev, op)
+    enqueue(id)
+    return op.result
+  end
+
+  -- wake_one schedules one run now if it is queued or starting (a replayed retry recovers its
+  -- queued state). A run that is stuck again or finished is not scheduled: that is a new retry.
   function engine.wake_one(id)
     local run = engine.get(id)
-    if not finished(run) then enqueue(id) end
+    if run.status == 'queued' or run.status == 'starting' then enqueue(id) end
     return run
   end
 
@@ -233,6 +258,14 @@ function M.new(opts)
         run.grant_revoked = true
         save(run, rev)
       end
+      return
+    end
+    if owes_grant_check(run) then
+      -- Never dispatches: it only records the grant (then revokes it) or that there is none.
+      local grant_id = opts.find_grant and opts.find_grant(copy(run))
+      if grant_id then run.grant_id = grant_id else run.grant_checked = true end
+      save(run, rev)
+      if owes_revoke(run) then enqueue(id) end
       return
     end
     if finished(run) then return end
@@ -313,7 +346,7 @@ function M.new(opts)
         if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run scan') end
         for _, record in pairs(page.records) do
           local run = record.value
-          if run and (not finished(run) or owes_revoke(run)) then enqueue(run.id) end
+          if run and (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
         end
         after, scanning = page.next, page.next ~= nil
         return
