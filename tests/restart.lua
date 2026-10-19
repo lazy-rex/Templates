@@ -67,8 +67,8 @@ end
 -- first tab and before the hub recorded it. A window hold (docs/testing.md) stops the create
 -- there. Until the restart the test asks only Rex: the hub gets no request while it holds a call.
 -- The hub never adopts accessory panes by their label (decided 2026-10-17), so the run stays
--- pending with its candidate panes, and Dismiss ends it without closing a pane. "Same-key retry"
--- here is a replay of the original Start operation, by the hub after its restart.
+-- pending with its candidate panes, and Dismiss ends it without closing a pane. The hub replays
+-- the original Start operation after its restart; it must give the same run.
 test('lab 4 a crash inside a tab create: the run waits pending with its candidate panes; Dismiss keeps them', function()
   local alice = agent('alice')
   local s, root = saved_template(alice, 'crash-create')
@@ -85,6 +85,7 @@ test('lab 4 a crash inside a tab create: the run waits pending with its candidat
   -- The first tab ("code") has two panes; Rex made both before the hold.
   local panes = wait('the first tab\'s panes', function() local p = spawn_blocks(N); return #p == 2 and p or nil end, 20)
   local windows = window_ids(N)
+  expect(#windows).to_be(1)
   hub:restart({crash = true})
   -- The run resumes, gets the recorded pending leaves for the same key, and stops at tab 1.
   local run = W.wait_run(alice, id, 'pending')
@@ -93,7 +94,8 @@ test('lab 4 a crash inside a tab create: the run waits pending with its candidat
     local o = operation(key)
     return o.status ~= 'pending' and o or nil
   end, 30)
-  if op.status == 'succeeded' then expect(op.result.run_id).to_be(id) end
+  expect(op.status).to_be('succeeded')
+  expect(op.result.run_id).to_be(id)
   -- The resolver reports one candidate pane per leaf; it adopts none.
   wait('the candidate panes', function()
     local n = 0
@@ -116,11 +118,15 @@ test('lab 4 a crash inside a tab create: the run waits pending with its candidat
   expect(W.find(stuck, 'id', 'dismiss:' .. id)).not_to_be(nil)
   expect(p:action('stuck', 'dismiss', {item_id = 'dismiss:' .. id}, 'lab4-dismiss').status).to_be('succeeded')
   expect(W.run_of(alice, id).status).to_be('dismissed')
+  expect(W.template('crash-create')).not_to_be(nil)
   expect(spawn_blocks(N)).to_equal(panes)
   expect(window_ids(N)).to_equal(windows)
-  -- A replay of the original Start after Dismiss creates nothing: the operation is final.
+  -- The Start operation's record after Dismiss (a read, not a resubmit). A resubmit through the
+  -- same form waits for the harness fix testview-reattach: now the form's renderer still sends to
+  -- the old hub client ("lazyrex-hub is waiting to reconnect").
   local again = operation(key)
-  expect(again.status).to_be(op.status)
+  expect(again.status).to_be('succeeded')
+  expect(again.result.run_id).to_be(id)
   expect(W.next_run_id()).to_be(tostring(tonumber(id) + 1))
   expect(spawn_blocks(N)).to_equal(panes)
   expect(window_ids(N)).to_equal(windows)
