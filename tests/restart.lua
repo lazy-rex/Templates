@@ -68,7 +68,8 @@ end
 -- there. Until the restart the test asks only Rex: the hub gets no request while it holds a call.
 -- The hub never adopts accessory panes by their label (decided 2026-10-17), so the run stays
 -- pending with its candidate panes, and Dismiss ends it without closing a pane. The hub replays
--- the original Start operation after its restart; it must give the same run.
+-- the original Start operation after its restart; it must give the same run. A resubmit of that
+-- Start after Dismiss creates nothing.
 test('lab 4 a crash inside a tab create: the run waits pending with its candidate panes; Dismiss keeps them', function()
   local alice = agent('alice')
   local s, root = saved_template(alice, 'crash-create')
@@ -110,9 +111,8 @@ test('lab 4 a crash inside a tab create: the run waits pending with its candidat
   expect(spawn_blocks(N)).to_equal(panes)
   expect(window_ids(N)).to_equal(windows)
   expect(W.next_run_id()).to_be(tostring(tonumber(id) + 1))
-  -- Dismiss from the panel (a pending run has no Retry row). The panel opens in another session:
-  -- after the crash, the form's side panel did not give up its place (reported separately).
-  local p = W.panel(W.workspace())
+  -- Dismiss from the panel, opened from the form's session (a pending run has no Retry row).
+  local p = W.panel(s)
   local stuck = node(p:render(), 'stuck').items
   expect(W.find(stuck, 'id', 'retry:' .. id)).to_be(nil)
   expect(W.find(stuck, 'id', 'dismiss:' .. id)).not_to_be(nil)
@@ -121,12 +121,18 @@ test('lab 4 a crash inside a tab create: the run waits pending with its candidat
   expect(W.template('crash-create')).not_to_be(nil)
   expect(spawn_blocks(N)).to_equal(panes)
   expect(window_ids(N)).to_equal(windows)
-  -- The Start operation's record after Dismiss (a read, not a resubmit). A resubmit through the
-  -- same form waits for the harness fix testview-reattach: now the form's renderer still sends to
-  -- the old hub client ("lazyrex-hub is waiting to reconnect").
+  -- The original Start again after Dismiss. The first form is gone: after the restart, the
+  -- operation's effect replaced it with the panel, so its renderer client no longer exists. A new
+  -- Start form of the same pane, with the same key and values, is refused by the hub (the view
+  -- is part of the operation's arguments) and calls no plugin.
+  local form2 = W.open('start_session', '/forms/start', s)
+  expect_error(function()
+    form2:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = key})
+  end, 'operation_conflict')
   local again = operation(key)
   expect(again.status).to_be('succeeded')
   expect(again.result.run_id).to_be(id)
+  expect(W.run_of(alice, id).status).to_be('dismissed')
   expect(W.next_run_id()).to_be(tostring(tonumber(id) + 1))
   expect(spawn_blocks(N)).to_equal(panes)
   expect(window_ids(N)).to_equal(windows)
