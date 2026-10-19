@@ -40,6 +40,30 @@ end
 local function message(err)
   return type(err) == 'table' and (err.message or err.code or 'Request failed') or tostring(err)
 end
+-- A run record is written whole in one hub.store.batch, and one control message is at most
+-- 64 KiB (rex-protocol.md, "Rex Lua runtime"). The record grows after admission: each tab gets its
+-- request (a copy of its layout) and its result. MAX_RUN is the largest record that admission
+-- accepts at its final size (an upper bound), with 2 KiB for the batch envelope.
+local MAX_RUN = 62 * 1024
+-- encoded_size is an upper bound of the JSON size of v (every character of a string counts as an
+-- escape when it needs one; a number counts 24 bytes).
+local function encoded_size(v)
+  local t = type(v)
+  if t == 'string' then
+    local _, special = v:gsub('[%c"\\]', '')
+    return #v + 2 + special * 5
+  end
+  if t == 'number' then return 24 end
+  if t == 'boolean' then return 5 end
+  if t ~= 'table' then return 4 end
+  local n = 2
+  for k, x in pairs(v) do n = n + encoded_size(tostring(k)) + 2 + encoded_size(x) end
+  return n
+end
+local function count_leaves(node)
+  if node.direction then return count_leaves(node.before) + count_leaves(node.after) end
+  return 1
+end
 local function finished(run)
   return run.status == 'open' or run.status == 'failed' or run.status == 'closed' or run.status == 'dismissed'
 end
@@ -171,6 +195,23 @@ function M.new(opts)
     if by_agent(run) then run.status = 'authorizing' end
     if request.session_id then run.session_id = request.session_id end
     for i, tab in ipairs(tabs) do tab.key = 'templates/' .. id .. '/tab/' .. tostring(i) end
+    -- Refuse a run that cannot be written at its final size: it would stop at its first update
+    -- with a session made and no tab (observed in the lab, tests/limits.lua).
+    local final = copy(run)
+    final.session_id, final.status, final.error = string.rep('x', 48), 'starting', string.rep('x', 200)
+    final.grant_id, final.grant_revoked, final.next_tab = string.rep('x', 64), true, #tabs + 1
+    for i, tab in ipairs(final.tabs) do
+      tab.request = {key = tab.key, session = final.session_id, title = tab.title, layout = copy(tab.layout),
+        placement = copy(request.placement), grant_id = final.grant_id}
+      local blocks = {}
+      for b = 1, count_leaves(tab.layout) do blocks[b] = string.rep('x', 48) end
+      final.results[i] = {status = 'open', window_id = string.rep('x', 48), block_ids = blocks, error = string.rep('x', 200)}
+    end
+    local size = encoded_size(final)
+    if size > MAX_RUN then
+      fail('invalid_input', string.format('The template is too large to start: its start record needs about %d KiB, and the limit is %d KiB',
+        math.ceil(size / 1024), math.floor(MAX_RUN / 1024)))
+    end
     batch({{key=admission_key, if_rev=admission_rev, value={id=id}},
       {key='run-counter', if_rev=counter_rev, value=id}, {key='run/' .. id, if_rev='0', value=run}})
     enqueue(id)

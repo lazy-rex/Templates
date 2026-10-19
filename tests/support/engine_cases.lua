@@ -350,5 +350,11 @@ function tests.op_exists_is_its_own_error()
   f.op_exists=true
   expect_error(function() e.dismiss(run.id, {key='d', fingerprint='fp', result={}}) end, 'op_exists')
 end
+function tests.admission_refuses_a_run_too_large_at_its_final_size()
+  local f=fixture(); local e=f.engine(); local r=request()
+  r.template.tabs[1].layout.before.launch.args={task=string.rep('x', 40000)}
+  expect_error(function() e.admit(r) end, 'invalid_input')
+  assert(f.records['run-counter'] == nil, 'a refused run was admitted')
+end
 return tests
 end
