@@ -42,6 +42,90 @@ test('lab 4 the hub crashes right after a user start is admitted: the run finish
   expect(#workers_in(alice, run.session_id)).to_be(3)
 end)
 
+-- spawn_blocks lists the blocks of a session that carry a lazyrex-spawn label, sorted.
+local function spawn_blocks(s)
+  local ids = {}
+  for _, b in ipairs(rex.call('session.list_blocks', {session_id = s}).blocks) do
+    if (b.label or ''):match('^lazyrex%-spawn:') then ids[#ids + 1] = b.block_id end
+  end
+  table.sort(ids)
+  return ids
+end
+local function window_ids(s)
+  local ids = {}
+  for _, w in ipairs(view(s).windows) do ids[#ids + 1] = w.window_id end
+  table.sort(ids)
+  return ids
+end
+local function session_ids()
+  local set = {}
+  for _, x in ipairs(rex.call('session.list', {}).sessions) do set[x.session_id] = true end
+  return set
+end
+
+-- lab 4 (formerly templates-lab.mjs, TEMPLATES_RESTART=1): the hub crashes after Rex created the
+-- first tab and before the hub recorded it. A window hold (docs/testing.md) stops the create
+-- there. Until the restart the test asks only Rex: the hub gets no request while it holds a call.
+-- The hub never adopts accessory panes by their label (decided 2026-10-17), so the run stays
+-- pending with its candidate panes, and Dismiss ends it without closing a pane. "Same-key retry"
+-- here is a replay of the original Start operation, by the hub after its restart.
+test('lab 4 a crash inside a tab create: the run waits pending with its candidate panes; Dismiss keeps them', function()
+  local alice = agent('alice')
+  local s, root = saved_template(alice, 'crash-create')
+  local form = W.open('start_session', '/forms/start', s)
+  local values = W.form_input(form:render(), 'start_session')
+  values.template, values.root, values.session_id = 'crash-create', root, '@new'
+  local id = W.next_run_id()
+  local before = session_ids()
+  inject({match = {window = 'templates/' .. id .. '/tab/1', caller = 'user'}, hold = true})
+  local _, key = form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = 'lab4-create'})
+  local N = wait('the new session', function()
+    for sid in pairs(session_ids()) do if not before[sid] and #spawn_blocks(sid) > 0 then return sid end end
+  end, 20)
+  -- The first tab ("code") has two panes; Rex made both before the hold.
+  local panes = wait('the first tab\'s panes', function() local p = spawn_blocks(N); return #p == 2 and p or nil end, 20)
+  local windows = window_ids(N)
+  hub:restart({crash = true})
+  -- The run resumes, gets the recorded pending leaves for the same key, and stops at tab 1.
+  local run = W.wait_run(alice, id, 'pending')
+  expect(run.session_id).to_be(N)
+  local op = wait('the replayed Start operation', function()
+    local o = operation(key)
+    return o.status ~= 'pending' and o or nil
+  end, 30)
+  if op.status == 'succeeded' then expect(op.result.run_id).to_be(id) end
+  -- The resolver reports one candidate pane per leaf; it adopts none.
+  wait('the candidate panes', function()
+    local n = 0
+    for _, w in ipairs(alice:hub('hub.workers', {}).workers) do
+      if w.session_id == N then
+        if w.state ~= 'starting' then return nil end
+        if w.error == 'outcome unknown: 1 candidate pane(s)' then n = n + 1 end
+      end
+    end
+    return n == 2
+  end, 30)
+  expect(spawn_blocks(N)).to_equal(panes)
+  expect(window_ids(N)).to_equal(windows)
+  expect(W.next_run_id()).to_be(tostring(tonumber(id) + 1))
+  -- Dismiss from the panel (a pending run has no Retry row). The panel opens in another session:
+  -- after the crash, the form's side panel did not give up its place (reported separately).
+  local p = W.panel(W.workspace())
+  local stuck = node(p:render(), 'stuck').items
+  expect(W.find(stuck, 'id', 'retry:' .. id)).to_be(nil)
+  expect(W.find(stuck, 'id', 'dismiss:' .. id)).not_to_be(nil)
+  expect(p:action('stuck', 'dismiss', {item_id = 'dismiss:' .. id}, 'lab4-dismiss').status).to_be('succeeded')
+  expect(W.run_of(alice, id).status).to_be('dismissed')
+  expect(spawn_blocks(N)).to_equal(panes)
+  expect(window_ids(N)).to_equal(windows)
+  -- A replay of the original Start after Dismiss creates nothing: the operation is final.
+  local again = operation(key)
+  expect(again.status).to_be(op.status)
+  expect(W.next_run_id()).to_be(tostring(tonumber(id) + 1))
+  expect(spawn_blocks(N)).to_equal(panes)
+  expect(window_ids(N)).to_equal(windows)
+end)
+
 test('an agent start returns before its tabs; after a hub restart they open as the agent\'s', function()
   local alice, bob = agent('alice'), agent('bob')
   local _, root = saved_template(alice, 'crash-agent')
