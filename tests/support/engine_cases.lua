@@ -327,13 +327,23 @@ function tests.dismissed_run_revokes_a_grant_that_it_did_not_record()
   assert(f.creates == 0 and f.sessions == 0 and #f.calls == 0, 'a dismissed run dispatched')
   assert(equal(f.revoked, {'grant:9'}) and e.get(run.id).grant_revoked == true)
 end
-function tests.finished_run_without_a_grant_checks_once()
+function tests.finished_run_without_a_grant_checks_once_per_engine()
   local f=fixture(); local e=f.engine(); local run=e.admit(agent_request())
   e.dismiss(run.id); drain(e)
   local lookups=f.lookups
-  assert(e.get(run.id).grant_checked == true)
-  e.resume(); drain(e)
-  assert(f.lookups == lookups and #f.revoked == 0)
+  e.wake(); drain(e)
+  assert(f.lookups == lookups and #f.revoked == 0, 'a second lookup in one engine')
+  e=f.engine(); e.resume(); drain(e)
+  assert(f.lookups == lookups + 1, 'a new engine looks again')
+end
+function tests.late_grant_is_found_after_restart()
+  -- The reviewer's case: the grant commits after the first lookup (a start call still ran).
+  local f=fixture(); local e=f.engine(); local run=e.admit(agent_request())
+  e.dismiss(run.id); drain(e)
+  f.grant='grant:late'
+  e=f.engine(); e.resume(); drain(e)
+  assert(equal(f.revoked, {'grant:late'}), 'resume missed the late grant')
+  assert(#f.calls == 0 and f.sessions == 0)
 end
 function tests.op_exists_is_its_own_error()
   local f=fixture(); local e=f.engine(); local run=e.admit(request()); f.pending=true; drain(e)

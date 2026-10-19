@@ -49,15 +49,17 @@ local function by_agent(run) return run.request.by ~= nil and run.request.by ~= 
 -- A finished agent run gives its grant back (hub.grant.revoke) after its final state commits.
 local function owes_revoke(run) return finished(run) and run.grant_id ~= nil and not run.grant_revoked end
 -- A grant can commit in the hub before the run records it (a lost reply or a crash before
--- engine.authorize). A finished agent run without a grant ID looks for it once, to revoke it.
-local function owes_grant_check(run) return finished(run) and by_agent(run) and run.grant_id == nil and not run.grant_checked end
+-- engine.authorize), or after the run finished (a start call that was still running). A finished
+-- agent run without a grant ID looks for it once per engine (checked, in memory), to revoke it.
+-- Each new engine (a plugin start) looks again, so a late grant is found without a loop.
+local function owes_grant_check(run) return finished(run) and by_agent(run) and run.grant_id == nil end
 
 function M.new(opts)
   local hub = assert(opts.hub, 'hub is required')
   local start_tab = assert(opts.start_tab, 'start_tab is required')
   local resolve_root = assert(opts.resolve_root, 'resolve_root is required')
   local resolve_dir = assert(opts.resolve_dir, 'resolve_dir is required')
-  local engine, queue, queued = {}, {}, {}
+  local engine, queue, queued, checked = {}, {}, {}, {}
   local scanning, after = false, nil
   local function enqueue(id)
     if not queued[id] then queue[#queue + 1], queued[id] = id, true end
@@ -261,11 +263,15 @@ function M.new(opts)
       return
     end
     if owes_grant_check(run) then
-      -- Never dispatches: it only records the grant (then revokes it) or that there is none.
+      -- Never dispatches: it only records the grant, then revokes it.
+      if checked[id] then return end
       local grant_id = opts.find_grant and opts.find_grant(copy(run))
-      if grant_id then run.grant_id = grant_id else run.grant_checked = true end
-      save(run, rev)
-      if owes_revoke(run) then enqueue(id) end
+      checked[id] = true
+      if grant_id then
+        run.grant_id = grant_id
+        save(run, rev)
+        enqueue(id)
+      end
       return
     end
     if finished(run) then return end
