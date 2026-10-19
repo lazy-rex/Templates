@@ -294,10 +294,14 @@ local function agent_caller(pid)
   if type(pid) ~= 'number' or pid <= 0 or pid % 1 ~= 0 then fail('refused', 'A positive requester PID is required') end
   local r = hub('hub.identify', {pid = pid})
   if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
-  if #r.agent > run_module.MAX_ID then fail('refused', 'The agent ID is too long') end
   local ids = {r.agent}
   for _, l in ipairs(type(r.legacy) == 'table' and r.legacy or {}) do
-    if type(l) == 'string' and l ~= '' and #l <= run_module.MAX_ID then ids[#ids + 1] = l end
+    if type(l) == 'string' and l ~= '' then ids[#ids + 1] = l end
+  end
+  -- Every ID can be part of an operation key that a run write carries (templates_run.lua, size
+  -- bounds). An agent with a longer ID is refused as a whole; no ID is left out.
+  for _, id in ipairs(ids) do
+    if #id > run_module.MAX_ID or id:find('%c') then fail('refused', 'An ID of this agent is longer than ' .. run_module.MAX_ID .. ' bytes or has control characters') end
   end
   return {id = r.agent, ids = ids, session_id = r.session_id, pid = pid}
 end
@@ -313,7 +317,9 @@ end
 local function op_keys(kind, caller, key)
   text(key, caller.id == 'user' and 'operation key' or 'key')
   -- Bounded: dismiss and retry commit the key in the batch of a run record (templates_run.lua).
-  if #key > run_module.MAX_KEY then fail('invalid_input', 'A key is at most ' .. run_module.MAX_KEY .. ' bytes') end
+  if #key > run_module.MAX_KEY or key:find('%c') then
+    fail('invalid_input', 'A key is at most ' .. run_module.MAX_KEY .. ' bytes, without control characters')
+  end
   if caller.id == 'user' then return {kind .. '/' .. part(key)} end
   local list = {}
   for _, id in ipairs(caller.ids) do list[#list + 1] = kind .. '/agent/' .. part(id) .. part(key) end
@@ -625,6 +631,8 @@ local function start_core(caller, key, fingerprint, intent)
     -- A record from before the switch has no time: its wait is over.
     request, at = saved.value.request, type(saved.value.at) == 'number' and saved.value.at or 0
   else
+    -- Checked before the frozen request is written: the run repeats the session ID in each tab.
+    if intent.session_id ~= nil and not run_module.valid_id(intent.session_id) then fail('invalid_input', 'Invalid session ID') end
     local tpl = load_template(intent.template)
     request = {key = key, template = {v = tpl.v, name = tpl.name, tabs = tpl.tabs}, root = text(intent.root, 'Root')}
     if intent.placement then request.placement = intent.placement end

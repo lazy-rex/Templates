@@ -102,5 +102,7 @@ function W.next_run_id() return tostring((tonumber(store('run-counter').value) o
 function W.template(name) return store('template/' .. W.hex(name)).value end
 -- The records of a UI start with operation key key.
 function W.start_form_key(key) return 'start-form/' .. W.hex('start/' .. W.part(key)) end
+-- The start record of an agent's start: 'start/agent/' .. part(agent) .. part(key).
+function W.start_form_key_agent(agent_id, key) return 'start-form/' .. W.hex('start/agent/' .. W.part(agent_id) .. W.part(key)) end
 function W.switch_record(key) return store('switch/' .. W.hex('start/' .. W.part(key))).value end
 return W

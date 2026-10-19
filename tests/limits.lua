@@ -99,3 +99,24 @@ test('keys are bounded: a key over 200 bytes is refused before anything is writt
   local a = agent('alice')
   expect_error(function() a:call('templates.dismiss', {run_id = '1', key = string.rep('k', 201)}) end, 'invalid_input')
 end)
+
+-- The reviewer's case: a session ID in the request is repeated in each tab request. An ID outside
+-- the bound is refused before anything is written.
+test('an oversized input session ID is refused before the start is written', function()
+  local a = agent('alice')
+  write({{key = 'template/6964', value = {v = 1, name = 'id', saved_by = 'alice', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  local before = W.next_run_id()
+  expect_error(function()
+    a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = string.rep('s', 25000), key = 'long-session'})
+  end, 'invalid_input')
+  expect_error(function()
+    a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = 'session:"quoted"', key = 'odd-session'})
+  end, 'invalid_input')
+  expect(W.next_run_id()).to_be(before)
+  expect(store(W.start_form_key_agent('alice', 'long-session')).value).to_be(nil)
+end)
+
+test('a key with a control character is refused', function()
+  local a = agent('alice')
+  expect_error(function() a:call('templates.dismiss', {run_id = '1', key = 'a\nb'}) end, 'invalid_input')
+end)

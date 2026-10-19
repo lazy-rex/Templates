@@ -42,14 +42,22 @@ end
 -- field that a later write adds has a bound:
 --   MAX_TEXT: an error text that the run stores (a longer one is cut; the full text goes to the
 --     plugin log through opts.log).
---   MAX_ID: a session, window, block or grant ID from the hub (a longer one is an invalid result).
+--   MAX_ID: a session, window, block or grant ID, from the hub or from a request: 1 to MAX_ID
+--     characters of [A-Za-z0-9.:_-] (valid_id), so its JSON is its length + 2. Another value is
+--     refused in a request, and is an invalid result from the hub.
+--   MAX_RUN_ID: the digits of a run ID (the run counter).
 -- Admission computes the record at its final size with these bounds (every tab request and
 -- result, the IDs, an error) and refuses a run over MAX_RUN. The other 2 KiB is the envelope of
--- the largest write of a run: the client.perform frame (client ID, action, timeout, about 200 B),
--- the op of the record ("run/" + an ID of at most 32 digits, an if_rev of at most 20 digits), and
--- the operation that dismiss or retry commits with it (its key is at most MAX_KEY + 2 * MAX_ID +
--- 32 B, its fingerprint at most 64 B, its result at most 96 B): about 900 B in all.
-local MAX_TEXT, MAX_ID, MAX_KEY = 512, 128, 200
+-- the largest write of a run, counted as encoded JSON:
+--   the client.perform frame (client ID, action, timeout, names): about 200 B;
+--   the record op: "run/" + at most 32 digits, an if_rev of at most 20 digits: about 90 B;
+--   the operation that dismiss or retry commits with the record (templates.lua): its key is
+--   "dismiss/agent/" + part(agent ID) + part(key). An agent ID is at most MAX_ID characters
+--   without control characters, and a key at most MAX_KEY: a quote or a backslash encodes as 2 B,
+--   so at most 14 + 4 + 256 + 4 + 400 = 678 B. Its fingerprint is at most 50 B, its result at most
+--   80 B, and the names about 100 B.
+-- In all at most about 1200 B.
+local MAX_TEXT, MAX_ID, MAX_KEY, MAX_RUN_ID = 512, 128, 200, 32
 local MAX_RUN = 62 * 1024
 M.MAX_TEXT, M.MAX_ID, M.MAX_KEY = MAX_TEXT, MAX_ID, MAX_KEY
 -- bounded cuts a text to MAX_TEXT bytes on a UTF-8 character boundary, with "…" at the end, and
@@ -65,7 +73,9 @@ M.bounded = bounded
 local function message(err)
   return type(err) == 'table' and (err.message or err.code or 'Request failed') or tostring(err)
 end
-local function short_id(v) return type(v) == 'string' and v ~= '' and #v <= MAX_ID end
+local function valid_id(v) return type(v) == 'string' and #v >= 1 and #v <= MAX_ID and not v:find('[^%w%.:_%-]') end
+M.valid_id = valid_id
+local short_id = valid_id
 -- encoded_size is an upper bound of the JSON size of v (a number counts 24 bytes).
 local function encoded_size(v)
   local t = type(v)
@@ -185,6 +195,7 @@ function M.new(opts)
     end
     if (request.session_id ~= nil) == (request.new_session_name ~= nil) then fail('invalid_input', 'Choose one existing or new session') end
     if request.by ~= nil then text(request.by, 'by') end
+    if request.session_id ~= nil and not valid_id(request.session_id) then fail('invalid_input', 'Invalid session ID') end
     if request.by ~= nil and request.by ~= 'user' and request.placement ~= nil then fail('invalid_input', 'An agent start has no placement') end
     text(request.session_id or request.new_session_name, 'session')
     if request.placement ~= nil then
@@ -218,6 +229,7 @@ function M.new(opts)
       id, carry = tostring(n % 10) .. id, math.floor(n / 10)
     end
     if carry == 1 then id = '1' .. id end
+    if #id > MAX_RUN_ID then fail('unavailable', 'The run counter is full') end
     local run = {id=id, request=copy(request), root=root, tabs=tabs, next_tab=1,
       status='queued', results={}, session_key='templates/' .. id .. '/session'}
     -- An agent's run waits for its grant (engine.authorize) before it dispatches anything.
@@ -227,10 +239,10 @@ function M.new(opts)
     -- Refuse a run that cannot be written at its final size: it would stop at its first update
     -- with a session made and no tab (observed in the lab, tests/limits.lua).
     local final, id_max, text_max = copy(run), string.rep('x', MAX_ID), string.rep('"', MAX_TEXT)
-    final.session_id, final.status, final.error = id_max, 'dismissed', text_max
+    final.session_id, final.status, final.error = request.session_id or id_max, 'dismissed', text_max
     final.dismissed_from, final.grant_id, final.grant_revoked, final.next_tab = 'authorizing', id_max, true, #tabs + 1
     for i, tab in ipairs(final.tabs) do
-      tab.request = {key = tab.key, session = id_max, title = tab.title, layout = copy(tab.layout),
+      tab.request = {key = tab.key, session = final.session_id, title = tab.title, layout = copy(tab.layout),
         placement = copy(request.placement), grant_id = id_max}
       local blocks = {}
       for b = 1, count_leaves(tab.layout) do blocks[b] = id_max end

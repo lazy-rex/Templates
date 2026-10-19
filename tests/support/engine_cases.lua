@@ -375,5 +375,13 @@ function tests.an_oversized_id_from_the_hub_is_an_invalid_result()
   local got=e.get(run.id)
   assert(got.status == 'blocked' and got.error:find('Invalid tab start result', 1, true), got.status)
 end
+function tests.admission_refuses_an_invalid_session_id()
+  local f=fixture(); local e=f.engine()
+  for _, sid in ipairs({string.rep('s', 129), 'session:"x"', 'a b'}) do
+    local r=request(); r.new_session_name=nil; r.session_id=sid
+    expect_error(function() e.admit(r) end, 'invalid_input')
+  end
+  assert(f.records['run-counter'] == nil)
+end
 return tests
 end
