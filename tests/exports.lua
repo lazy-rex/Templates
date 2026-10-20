@@ -124,7 +124,7 @@ test('the user starts through the form into a new session', function()
   values.template, values.root, values.session_id = 'st-user', root, '@new'
   local done = form:action('start_session', 'submit', {values = values}, 'ui-start-1')
   expect(done.status).to_be('succeeded')
-  local runs = alice:call('templates.runs', {}).runs
+  local runs = W.all_runs(alice)
   local run = find(runs, 'template', 'st-user')
   expect(run.by).to_be('user')
   wait_run(alice, run.id, 'open')

@@ -31,7 +31,7 @@ local function notice(s)
   local w = node(W.panel(s):render(), 'switch')
   return w and w.text
 end
-local function run_named(name) return W.find(S.alice:call('templates.runs', {}).runs, 'template', name) end
+local function run_named(name) return W.find(W.all_runs(S.alice), 'template', name) end
 -- hold makes the next run's first update fail until release: its first tab is late. release waits
 -- until the hold stopped an update (else the test proves nothing), ends it and wakes the engine.
 local function hold()

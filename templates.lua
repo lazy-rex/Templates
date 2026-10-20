@@ -938,6 +938,41 @@ local function run_view(r)
   return {id = r.id, template = r.request.template.name, root = r.root, status = r.status, next_tab = r.next_tab,
     tabs = #r.tabs, error = r.error, by = r.request.by or 'user', session_id = r.session_id}
 end
+-- templates.runs pages. A plugin reply over 64 KiB never arrives (LazyRex docs/rex-protocol.md,
+-- "Rex Lua runtime"), so one page, encoded as the reply carries it, is at most RUNS_BUDGET bytes.
+-- Run IDs are decimal text (up to 32 digits): they compare by length, then as text, which is exact
+-- beyond 2^53. before is a canonical ID (no leading zero); the page holds runs older than it.
+local RUNS_BUDGET, RUNS_LIMIT, RUNS_MAX = 40 * 1024, 50, 100
+local function older(a, b) return #a < #b or #a == #b and a < b end
+local function json_size(v) return #rex.json.encode(v) end
+local function run_page(before, limit)
+  if limit == nil then limit = RUNS_LIMIT end
+  if type(limit) ~= 'number' or limit % 1 ~= 0 or limit < 1 or limit > RUNS_MAX then
+    fail('invalid_input', 'limit is an integer from 1 to ' .. RUNS_MAX)
+  end
+  if before ~= nil and (type(before) ~= 'string' or #before > 32 or not before:match('^[1-9]%d*$')) then
+    fail('invalid_input', 'before is a run ID: 1 to 32 digits, without a leading zero')
+  end
+  -- The reply is {"runs":[v1,...],"next_before":"<ID>"}: at most 64 bytes of names, brackets and a
+  -- 32-digit cursor, plus each view and its comma.
+  local page, size, next_before = {}, 64, nil
+  for _, r in ipairs(recent_runs()) do
+    if before == nil or older(r.id, before) then
+      if #page == limit then next_before = page[#page].id break end
+      local view = run_view(r)
+      local n = json_size(view) + 1
+      if size + n > RUNS_BUDGET then
+        if #page == 0 then
+          fail('too_large', 'Run ' .. r.id .. ' is too large to list (' .. n .. ' bytes). For older runs, use before = "' .. r.id .. '".')
+        end
+        next_before = page[#page].id
+        break
+      end
+      page[#page + 1], size = view, size + n
+    end
+  end
+  return {runs = page, next_before = next_before}
+end
 local agent_handlers = {
   ['templates.list'] = function(_, args)
     only(args, {})
@@ -964,10 +999,8 @@ local agent_handlers = {
   ['templates.save'] = agent_save,
   ['templates.start'] = agent_start,
   ['templates.runs'] = function(_, args)
-    only(args, {})
-    local list = {}
-    for _, r in ipairs(recent_runs()) do list[#list + 1] = run_view(r) end
-    return {runs = list}
+    only(args, {before = true, limit = true})
+    return run_page(args.before, args.limit)
   end,
   ['templates.delete'] = function(caller, args)
     only(args, {template = true, key = true})
@@ -1001,8 +1034,9 @@ local exports = {
       session_id = {type = 'string', minLength = 1}, new_session = {type = 'string', minLength = 1}, key = key_arg},
       required = {'template', 'root', 'key'}, additionalProperties = false}},
   {name = 'templates.runs', title = 'List template starts',
-    description = 'List template starts, newest first: id, template, root, status (authorizing, queued, starting, pending, unknown, blocked, open, failed, closed, dismissed), tabs, error, by and session_id.',
-    args = {type = 'object', properties = {}, additionalProperties = false}},
+    description = 'List template starts, newest first, one page at a time: id, template, root, status (authorizing, queued, starting, pending, unknown, blocked, open, failed, closed, dismissed), tabs, error, by and session_id. A page has at most limit starts (default 50, at most 100) and at most about 40 KB. When older starts exist, the reply has next_before: pass it as before for the next page. Without before, the page starts at the newest start.',
+    args = {type = 'object', properties = {before = {type = 'string', minLength = 1, maxLength = 32, description = 'A run ID: list the starts older than it (next_before of the previous page).'},
+      limit = {type = 'integer', minimum = 1, maximum = 100, description = 'The most starts in the page (default 50).'}}, additionalProperties = false}},
   {name = 'templates.delete', title = 'Delete a session template',
     description = 'Delete a template, also one that the user or another agent saved.',
     args = {type = 'object', properties = {template = {type = 'string', minLength = 1}, key = key_arg}, required = {'template', 'key'}, additionalProperties = false}},

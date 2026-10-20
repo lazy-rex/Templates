@@ -31,7 +31,7 @@ local function once(list, first, last)
 end
 local function run_ids(a)
   local ids = {}
-  for _, r in ipairs(a:call('templates.runs', {}).runs) do ids[#ids + 1] = r.id end
+  for _, r in ipairs(W.all_runs(a)) do ids[#ids + 1] = r.id end
   return ids
 end
 

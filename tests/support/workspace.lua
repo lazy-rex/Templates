@@ -90,10 +90,30 @@ function W.find(list, field, value)
 end
 
 -- Runs and records of the plugin.
+-- all_runs reads every page of templates.runs and returns the runs, newest first.
+function W.all_runs(a)
+  local list, before = {}, nil
+  repeat
+    local args = {limit = 100}
+    if before then args.before = before end
+    local r = a:call('templates.runs', args)
+    for _, x in ipairs(r.runs) do list[#list + 1] = x end
+    before = r.next_before
+  until not before
+  return list
+end
+-- run_of reads the pages of templates.runs until it finds the run (or the last page).
 function W.run_of(a, id)
-  local r = a:call('templates.runs', {})
-  if type(r.runs) ~= 'table' then error('templates.runs: ' .. rex.json.encode(r)) end
-  return W.find(r.runs, 'id', id)
+  local before
+  repeat
+    local args = {limit = 100}
+    if before then args.before = before end
+    local r = a:call('templates.runs', args)
+    if type(r.runs) ~= 'table' then error('templates.runs: ' .. rex.json.encode(r)) end
+    local found = W.find(r.runs, 'id', id)
+    if found then return found end
+    before = r.next_before
+  until not before
 end
 function W.wait_run(a, id, status)
   return wait('run ' .. id .. ' ' .. status, function()
