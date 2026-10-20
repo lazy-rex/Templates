@@ -46,27 +46,39 @@ end
 --     characters of [A-Za-z0-9.:_-] (valid_id), so its JSON is its length + 2. Another value is
 --     refused in a request, and is an invalid result from the hub.
 --   MAX_RUN_ID: the digits of a run ID (the run counter).
--- Admission computes the record at its final size with these bounds (every tab request and
--- result, the IDs, an error) and refuses a run over MAX_RUN. The other 2 KiB is the envelope of
--- the largest write of a run, counted as encoded JSON:
+-- Sizes are measured with rex.json.encode, the encoder that writes the record. It encodes "<", ">"
+-- and "&" as 6 bytes, as the hub does (observed on Rex 0.0.1792158932-g88fd41), so a count of the
+-- raw bytes is not a bound.
+-- Admission builds the record at its final size with these bounds (every tab request and result,
+-- the IDs, an error at MAX_TEXT_JSON), measures it and refuses a run over MAX_RUN. The other
+-- 3 KiB is the envelope of the largest write of a run, as encoded JSON:
 --   the client.perform frame (client ID, action, timeout, names): about 200 B;
 --   the record op: "run/" + at most 32 digits, an if_rev of at most 20 digits: about 90 B;
 --   the operation that dismiss or retry commits with the record (templates.lua): its key is
---   "dismiss/agent/" + part(agent ID) + part(key). An agent ID is at most MAX_ID characters
---   without control characters, and a key at most MAX_KEY: a quote or a backslash encodes as 2 B,
---   so at most 14 + 4 + 256 + 4 + 400 = 678 B. Its fingerprint is at most 50 B, its result at most
---   80 B, and the names about 100 B.
--- In all at most about 1200 B.
+--   "dismiss/agent/" + part(agent ID) + part(key). An agent ID is at most MAX_ID bytes and a key
+--   at most MAX_KEY bytes, without control characters; "<", ">" and "&" encode as 6 bytes, so the
+--   key is at most 14 + 4 + 768 + 4 + 1200 + 2 = 1992 B. Its fingerprint is at most 50 B, its
+--   result at most 80 B, and the names about 100 B.
+-- In all about 2.5 KB (engine.lua measures the frames).
 local MAX_TEXT, MAX_ID, MAX_KEY, MAX_RUN_ID = 512, 128, 200, 32
-local MAX_RUN = 62 * 1024
-M.MAX_TEXT, M.MAX_ID, M.MAX_KEY = MAX_TEXT, MAX_ID, MAX_KEY
--- bounded cuts a text to MAX_TEXT bytes on a UTF-8 character boundary, with "…" at the end, and
--- replaces control characters with spaces (so its JSON is at most 2 * MAX_TEXT + 2 bytes).
+local MAX_TEXT_JSON = 2 * MAX_TEXT + 2
+local MAX_RUN = 61 * 1024
+M.MAX_TEXT, M.MAX_TEXT_JSON, M.MAX_ID, M.MAX_KEY, M.MAX_RUN = MAX_TEXT, MAX_TEXT_JSON, MAX_ID, MAX_KEY, MAX_RUN
+local function json_size(v) return #rex.json.encode(v) end
+-- bounded replaces control characters with spaces and cuts a text on a UTF-8 character boundary,
+-- with "…" at the end, so that it is at most MAX_TEXT bytes and its JSON at most MAX_TEXT_JSON
+-- bytes (the ellipsis included in both).
 local function bounded(text)
   text = tostring(text):gsub('%c', ' ')
-  if #text <= MAX_TEXT then return text end
-  local cut = MAX_TEXT - 3
-  while cut > 0 and text:byte(cut + 1) and text:byte(cut + 1) >= 0x80 and text:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+  if #text <= MAX_TEXT and json_size(text) <= MAX_TEXT_JSON then return text end
+  -- boundary moves a cut back over at most 3 continuation bytes (a valid character has no more).
+  local function boundary(cut)
+    local n = cut
+    while n > 0 and cut - n < 3 and text:byte(n + 1) and text:byte(n + 1) >= 0x80 and text:byte(n + 1) < 0xC0 do n = n - 1 end
+    return n
+  end
+  local cut = boundary(math.min(#text, MAX_TEXT - 3))
+  while cut > 0 and json_size(text:sub(1, cut) .. '…') > MAX_TEXT_JSON do cut = boundary(cut - 1) end
   return text:sub(1, cut) .. '…'
 end
 M.bounded = bounded
@@ -91,22 +103,6 @@ end
 local function valid_id(v) return type(v) == 'string' and #v >= 1 and #v <= MAX_ID and not v:find('[^%w%.:_%-]') end
 M.valid_id = valid_id
 local short_id = valid_id
--- encoded_size is an upper bound of the JSON size of v (a number counts 24 bytes).
-local function encoded_size(v)
-  local t = type(v)
-  if t == 'string' then
-    -- A control character encodes as \u00XX (6 bytes), a quote or a backslash as 2 bytes.
-    local _, control = v:gsub('%c', '')
-    local _, quoted = v:gsub('["\\]', '')
-    return #v + 2 + control * 5 + quoted
-  end
-  if t == 'number' then return 24 end
-  if t == 'boolean' then return 5 end
-  if t ~= 'table' then return 4 end
-  local n = 2
-  for k, x in pairs(v) do n = n + encoded_size(tostring(k)) + 2 + encoded_size(x) end
-  return n
-end
 local function count_leaves(node)
   if node.direction then return count_leaves(node.before) + count_leaves(node.after) end
   return 1
@@ -263,7 +259,7 @@ function M.new(opts)
       for b = 1, count_leaves(tab.layout) do blocks[b] = id_max end
       final.results[i] = {status = 'unknown', window_id = id_max, block_ids = blocks, error = text_max}
     end
-    local size = encoded_size(final)
+    local size = json_size(final)
     if size > MAX_RUN then
       fail('invalid_input', string.format('The template is too large to start: its start record needs about %d KiB, and the limit is %d KiB',
         math.ceil(size / 1024), math.floor(MAX_RUN / 1024)))

@@ -445,6 +445,139 @@ function tests.a_scan_stops_when_a_page_of_one_is_too_large()
   assert(not select(1, e.tick()) and #f.scans == 6, 'no scan after the stop')
   assert(e.get('1').status == 'queued')
 end
+-- Size bounds at their encoded size (templates_run.lua, "Size bounds"). rex do and the hub encode
+-- "<", ">" and "&" as 6 bytes; every size here is measured with rex.json.encode.
+local MAX_RUN, MAX_MESSAGE = 61 * 1024, 65536
+local function size(v) return #rex.json.encode(v) end
+local function part(s) return #s .. ':' .. s end
+-- The worst agent: an ID of MAX_ID "<" and a key of MAX_KEY "<" (both accepted, as before).
+local WORST_ID, WORST_KEY = string.rep('<', Run.MAX_ID), string.rep('<', Run.MAX_KEY)
+local function worst_op_key(kind) return kind .. '/agent/' .. part(WORST_ID) .. part(WORST_KEY) end
+-- The largest run ID: the counter is 31 nines and an 8, so the run is 32 nines.
+local RUN_ID = string.rep('9', 32)
+local function sized(ch, n)
+  local r = request(worst_op_key('start'))
+  r.template.tabs = {{title='One', layout={launch={profile='test', args={port=string.rep(ch, n)}}, dir='.'}}}
+  return r
+end
+local function fixture32()
+  local f = fixture(); f.records['run-counter'] = {rev='1', value=string.rep('9', 31) .. '8'}
+  return f
+end
+-- largest returns the admitted run with the largest arg (n bytes of ch, one pane), and its fixture.
+local function largest(ch)
+  local lo, hi = 0, 70000
+  while lo < hi do
+    local mid = math.floor((lo + hi + 1) / 2)
+    if pcall(fixture32().engine().admit, sized(ch, mid)) then lo = mid else hi = mid - 1 end
+  end
+  local f = fixture32()
+  local run = f.engine().admit(sized(ch, lo))
+  assert(run.id == RUN_ID and lo > 0, 'largest ' .. ch .. ': ' .. lo)
+  return run, f
+end
+-- worst_run fills a run with the largest values that later writes can add: every ID at MAX_ID,
+-- every error a bounded text of err_char.
+local function worst_run(run, err_char)
+  local id_max = string.rep('x', Run.MAX_ID)
+  local err = Run.bounded(string.rep(err_char, 4 * Run.MAX_TEXT))
+  local final = copy(run)
+  final.session_id, final.status, final.error = id_max, 'dismissed', err
+  final.dismissed_from, final.grant_id, final.grant_revoked, final.next_tab = 'authorizing', id_max, true, #run.tabs + 1
+  for i, tab in ipairs(final.tabs) do
+    tab.request = {key=tab.key, session=id_max, title=tab.title, layout=copy(tab.layout), grant_id=id_max}
+    final.results[i] = {status='unknown', window_id=id_max, block_ids={id_max}, error=err}
+  end
+  return final
+end
+-- frame is the client.perform request that carries a hub.store.batch of the plugin.
+local function frame(args)
+  return {type='request', id='4294967295', method='client.perform', payload={
+    client_id='client:01a156b7-98dc-7330-a826-228df9162450', action='hub.store.batch', timeout_ms=10000, args=args}}
+end
+local function fits(what, v, limit)
+  assert(size(v) <= limit, what .. ': encoded ' .. size(v) .. ' bytes, limit ' .. limit)
+end
+for _, case in ipairs({{'a', '<'}, {'&', '<'}, {'<', '"'}}) do
+  local args, errs = case[1], case[2]
+  tests['the largest admitted run with args of ' .. args .. ' and errors of ' .. errs .. ' fits in every write'] = function()
+    local run, f = largest(args)
+    local final = worst_run(run, errs)
+    fits('the final record', final, MAX_RUN)
+    -- The admission batch, as the engine wrote it (the fixture kept the record).
+    fits('the admission write', frame({ops={{key='run-key/' .. run.request.key, if_rev='0', value={id=RUN_ID}},
+      {key='run-counter', if_rev=string.rep('9', 20), value=RUN_ID}, {key='run/' .. RUN_ID, if_rev='0', value=f.records['run/' .. RUN_ID].value}}}), MAX_MESSAGE)
+    local record = {key='run/' .. RUN_ID, if_rev=string.rep('9', 20), value=final}
+    fits('a state write', frame({ops={record}}), MAX_MESSAGE)
+    fits('the dismiss write', frame({ops={record}, op={key=worst_op_key('dismiss'),
+      fingerprint='dismiss-v1/' .. part(RUN_ID), result={run_id=RUN_ID, status='dismissed'}}}), MAX_MESSAGE)
+    fits('the retry write', frame({ops={record}, op={key=worst_op_key('retry'),
+      fingerprint='retry-v1/' .. part(RUN_ID), result={run_id=RUN_ID, woken=true}}}), MAX_MESSAGE)
+  end
+end
+-- bounded against the real encoder: at most MAX_TEXT bytes and MAX_TEXT_JSON encoded bytes, the
+-- ellipsis included, cut on a character boundary, and short texts unchanged.
+local ELLIPSIS = string.char(0xE2, 0x80, 0xA6)
+local function valid_utf8(s)
+  local i = 1
+  while i <= #s do
+    local c = s:byte(i)
+    local n = c < 0x80 and 0 or c >= 0xF0 and c < 0xF8 and 3 or c >= 0xE0 and 2 or c >= 0xC2 and c < 0xE0 and 1 or nil
+    if not n then return false end
+    for j = 1, n do local d = s:byte(i + j); if not d or d < 0x80 or d >= 0xC0 then return false end end
+    i = i + n + 1
+  end
+  return true
+end
+function tests.bounded_texts_fit_both_limits_for_every_character_class()
+  local classes = {plain='a', angle='<>&', quote='"', backslash='\\', ls=string.char(0xE2, 0x80, 0xA8),
+    ps=string.char(0xE2, 0x80, 0xA9), e_acute=string.char(0xC3, 0xA9), malformed=string.char(0xFF),
+    mixed='a<' .. string.char(0xC3, 0xA9) .. '"'}
+  for name, unit in pairs(classes) do
+    for _, n in ipairs({1, 3, 2000}) do
+      local text = string.rep(unit, n)
+      local out = Run.bounded(text)
+      assert(#out <= Run.MAX_TEXT, name .. ': ' .. #out .. ' bytes')
+      assert(size(out) <= Run.MAX_TEXT_JSON, name .. ': ' .. size(out) .. ' encoded bytes')
+      if #text <= Run.MAX_TEXT and size(text) <= Run.MAX_TEXT_JSON then
+        assert(out == text, name .. ': a short text changed')
+      else
+        assert(out:sub(-3) == ELLIPSIS, name .. ': no ellipsis')
+        local prefix = out:sub(1, -4)
+        assert(text:sub(1, #prefix) == prefix, name .. ': not a prefix')
+        if name ~= 'malformed' then assert(valid_utf8(prefix), name .. ': cut inside a character') end
+      end
+    end
+  end
+end
+-- The encoding the bounds rely on (observed on Rex 0.0.1792158932-g88fd41). Admission measures with
+-- this encoder, so these values document it; they are not part of the bound.
+function tests.rex_json_encodes_angle_brackets_and_line_separators_as_6_bytes()
+  for _, s in ipairs({'<', '>', '&', string.char(0xE2, 0x80, 0xA8), string.char(0xE2, 0x80, 0xA9)}) do
+    assert(size(s) == 8, s .. ': ' .. size(s))
+  end
+  -- A malformed byte becomes U+FFFD, written as its 3 UTF-8 bytes (not escaped).
+  assert(size(string.char(0xFF)) == 5, 'a malformed byte: ' .. size(string.char(0xFF)))
+end
+-- A run admitted before this bound, larger than it now allows, keeps its replay: the same request
+-- with its key returns the run, and another request with that key conflicts (no size check first).
+function tests.a_run_over_the_new_bound_replays_its_key()
+  local f = fixture()
+  -- About 63 KB: over the new bound, under the 64 KiB write limit (as an old admission could be).
+  local r = sized('&', 5250); r.key = 'old-start'
+  local run = {id='7', request=copy(r), root='/root', tabs={{title='One', key='templates/7/tab/1',
+    layout={profile='test', args={port=string.rep('&', 5250)}, cwd='/root'}}}, next_tab=1, status='blocked',
+    error='an older failure', results={}, session_key='templates/7/session'}
+  f.records['run-key/old-start'] = {rev='1', value={id='7'}}
+  f.records['run/7'] = {rev='2', value=run}
+  assert(size(run) > MAX_RUN and size(run) < MAX_MESSAGE, 'seeded run: ' .. size(run))
+  local e = f.engine()
+  local got = e.admit(copy(r))
+  assert(got.id == '7' and got.status == 'blocked')
+  local other = copy(r); other.root = '/other'
+  expect_error(function() e.admit(other) end, 'operation_conflict')
+  assert(f.records['run/8'] == nil)
+end
 function tests.admission_refuses_an_invalid_session_id()
   local f=fixture(); local e=f.engine()
   for _, sid in ipairs({string.rep('s', 129), 'session:"x"', 'a b'}) do

@@ -81,6 +81,58 @@ test('near the 64 KiB bound both paths open, or both refuse at admission; no run
   expect(seen.failed).to_be(true)
 end)
 
+-- "&", "<" and ">" encode as 6 bytes (rex do and the hub). A pane arg of 4000 "&" is 24 KB in each
+-- of the three copies in a run record (the template, the tab, the tab request): about 72 KB, over
+-- the 64 KiB bound. Admission must count it at its encoded size and refuse it on both paths.
+-- amp_template writes a one-pane template with that arg, named name (the new session's name too).
+local function amp_template(name)
+  write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = {{title = 'one',
+    layout = {launch = {profile = 'server', args = {port = string.rep('&', 4000)}}, dir = '.'}}}}}})
+end
+local function no_session(label)
+  for _, s in ipairs(rex.call('session.list', {}).sessions) do
+    if s.label == label then error('a session "' .. label .. '" exists') end
+  end
+end
+test('shell operators in args count at their encoded size: the user start refuses at admission', function()
+  local name = 'amp-user'
+  amp_template(name)
+  local before = W.next_run_id()
+  local s = W.workspace()
+  local form = W.open('start_session', '/forms/start', s)
+  local values = W.form_input(form:render(), 'start_session')
+  values.template, values.root, values.session_id = name, W.real(W.HOME), '@new'
+  local op = form:action('start_session', 'submit', {values = values}, 'ui-amp')
+  expect(op.status).to_be('failed')
+  expect(tostring(op.error.message)).to_match('too large to start')
+  expect(W.next_run_id()).to_be(before)
+  no_session(name)
+end)
+
+test('shell operators in args count at their encoded size: the agent start refuses at admission', function()
+  local a = agent('alice')
+  local name = 'amp-agent'
+  amp_template(name)
+  local before = W.next_run_id()
+  local err = expect_error(function() a:call('templates.start', {template = name, root = W.real(W.HOME), key = 'agent-amp'}) end, 'invalid_input')
+  expect(tostring(err.message)).to_match('too large to start')
+  expect(W.next_run_id()).to_be(before)
+  no_session(name)
+end)
+
+-- A key of 200 "<" (1200 bytes encoded) was valid before the encoded bounds and stays valid: the
+-- start replays with it, and another start with it conflicts.
+test('a key of 200 "<" still starts and replays', function()
+  local a = agent('alice')
+  write({{key = 'template/' .. W.hex('lt-key'), value = {v = 1, name = 'lt-key', saved_by = 'alice',
+    tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  local key, root = string.rep('<', 200), W.real(W.HOME)
+  local first = a:call('templates.start', {template = 'lt-key', root = root, key = key})
+  expect(a:call('templates.start', {template = 'lt-key', root = root, key = key}).run_id).to_be(first.run_id)
+  expect_error(function() a:call('templates.start', {template = 'lt-key', root = root, new_session = 'other', key = key}) end, 'operation_conflict')
+  W.wait_run(a, first.run_id, 'open')
+end)
+
 -- The reviewer's case: the hub's refusal repeats an 18 000-byte profile name. The run stores a
 -- bounded error, so it stays writable and ends blocked (it can be dismissed).
 test('a long refusal from the hub is stored bounded; the run blocks and can be dismissed', function()

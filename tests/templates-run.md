@@ -135,7 +135,7 @@ Every field that a later write adds has a bound:
 
 | Field | Bound | Longer value |
 | --- | --- | --- |
-| An error text (`run.error`, a tab result's `error`) | 512 bytes, control characters replaced with spaces | Cut on a UTF-8 boundary with "…". The full text goes to the plugin log. |
+| An error text (`run.error`, a tab result's `error`) | 512 bytes and 1 026 bytes of JSON, control characters replaced with spaces | Cut on a UTF-8 boundary with "…" (within both bounds). The full text goes to the plugin log. |
 | A session ID in a start request | 1 to 128 characters of `[A-Za-z0-9.:_-]` | `invalid_input`; nothing is written. |
 | A session, window or block ID from the hub | 1 to 128 characters of `[A-Za-z0-9.:_-]` | The result is invalid: the run blocks with a fixed error. |
 | A grant ID | 1 to 128 characters of `[A-Za-z0-9.:_-]` | `engine.authorize` refuses it with `invalid_input`. Recovery (`find_grant`) does not record it: the run stays authorizing and dispatches nothing. A finished run records no grant. |
@@ -145,11 +145,22 @@ Every field that a later write adds has a bound:
 | A run ID in a dismiss or retry | 32 digits | `not_found`. |
 | The run counter at admission | 32 digits | `unavailable` ("The run counter is full"); nothing is written. |
 
-Admission computes the record at its final size with these bounds (every tab request and result,
-the IDs and an error at their maximum, counted as encoded JSON) and refuses a run over 62 KiB
-with `invalid_input` ("too large to start"). It writes nothing then. The other 2 KiB is the envelope of the largest run
-write, at most about 1200 bytes as encoded JSON: the `client.perform` frame, the record op
-(`run/<id>`, `if_rev`), and the operation that dismiss or retry commits with the record.
+Sizes are encoded JSON as `rex.json.encode` writes them, the encoder that writes the record. It
+encodes `<`, `>` and `&` as 6 bytes, as the hub does, and a malformed byte as U+FFFD (3 bytes)
+(observed on Rex 0.0.1792158932-g88fd41). A count of the raw bytes is not a bound.
+
+Admission builds the record at its final size with these bounds (every tab request and result,
+the IDs and an error at their maximum) and measures it with `rex.json.encode`. It refuses a run
+over 61 KiB with `invalid_input` ("too large to start") and writes nothing then. The other 3 KiB
+is the envelope of the largest run write, about 2.5 KB as encoded JSON: the `client.perform`
+frame, the record op (`run/<id>`, `if_rev`), and the operation that dismiss or retry commits with
+the record. Its key holds an agent ID and a key that can be all `<` (6 bytes each), so it is up
+to 1 992 bytes. `tests/engine.lua` measures the largest admitted run in every write (admission, a
+state change, dismiss, retry) with a 32-digit run ID and the worst agent ID and key.
+
+The bound applies to new admissions. A run that an older version admitted, larger than 61 KiB,
+is not changed: its same-key admission still returns it (no size check comes first), and another
+request with its key still conflicts. A repair of such runs is not part of this bound.
 
 Measured on a lab hub (tests/limits.lua): a run record is about 3 times its template. A template
 of 18 KB in one tab opens on both paths; one of 20 KB in one tab of two panes is refused on both
