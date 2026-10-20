@@ -30,6 +30,9 @@ end
 function W.sh(cwd, label) return pane({'/bin/sh'}, cwd, label) end
 function W.ish(cwd, label, cmd) return pane({'/bin/sh', '-i', '-c', (cmd or 'sleep 600') .. '; :'}, cwd, label) end
 function W.direct(cwd, label) return pane({'/bin/sleep', '600'}, cwd, label) end
+-- login: a default pane (no command). On macOS its child is /usr/bin/login (root, no cwd), and the
+-- login shell is its foreground.
+function W.login(cwd, label) return {block = {flavor = 'com.superlogical.terminal.shell', label = label, options = {cwd = cwd}}} end
 function W.HS(ratio, before, after) return {split = {direction = 'horizontal', ratio = ratio, before = before, after = after}} end
 function W.VS(ratio, before, after) return {split = {direction = 'vertical', ratio = ratio, before = before, after = after}} end
 -- new_session creates a lab session of windows {{window_label, layout}, ...}.

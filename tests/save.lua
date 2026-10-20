@@ -59,6 +59,38 @@ test('lab 1 a pane left undecided is refused; Leave out removes the pane and its
     {title = 'logs', layout = {direction = 'vertical', ratio = 0.5, before = {launch = {shell = true}, dir = 'web'}, after = {launch = {profile = 'server'}, dir = '.'}}}}})
 end)
 
+-- A default pane runs the shell through login: the child (login) has no cwd, the foreground shell
+-- has it. Without terminal.pwd, the directory comes from the foreground (the reviewer's probe).
+-- The child is not a shell, so the pane has no launch guess: the user chooses Shell.
+test('a login pane has the directory of its foreground shell and no launch guess', function()
+  local alice = agent('alice')
+  local root = W.repo('login-shell')
+  local s = W.new_session('login-shell', {{window_label = 'shell', layout = W.login(root .. '/api')}})
+  local b = W.first_block(s)
+  wait('the login shell', function()
+    local p = rex.call('com.superlogical.terminal.process', {session_id = s, block_id = b, args = {}})
+    return p.child and p.child.name == 'login' and not p.child.cwd and p.foreground and p.foreground.cwd
+  end, 10)
+  local pane = alice:call('templates.capture', {session_id = s}).panes[1]
+  expect(pane.dir).to_be(root .. '/api')
+  expect(pane.guess).to_be(nil)
+  expect(pane.detail).not_to_be('directory unknown')
+  -- The form: the pane is undecided, not left out. An explicit Shell saves it.
+  local form = W.open('save_template', '/forms/save', s, b)
+  local values = W.form_input(form:render(), 'save_template')
+  expect(values.root).to_be(root)
+  expect(values['pane_' .. b]).to_be('@choose')
+  values.name, values['pane_' .. b] = 'login-form', 'shell'
+  expect(form:action('save_template', 'submit', {values = values}, 'login-save').status).to_be('succeeded')
+  expect(W.template('login-form').tabs).to_equal({{title = 'shell', layout = {launch = {shell = true}, dir = 'api'}}})
+  -- The agent path: the same pane with an explicit shell.
+  expect(alice:call('templates.save', {name = 'login-agent', root = root, session_id = s, panes = {[b] = 'shell'}, key = 'login-agent'}))
+    .to_equal({name = 'login-agent'})
+  -- The Start form's root default comes from the same directory (the git root of the source pane).
+  local start = W.open('start_session', '/forms/start', s, b)
+  expect(W.form_input(start:render(), 'start_session').root).to_be(root)
+end)
+
 -- A: the plugin replays a save (save_core, on both paths) after its source changed. Through the hub,
 -- a UI key belongs to its view action: another form with the same key is refused by the hub, so
 -- the UI replay is the hub's (the agent path tests the plugin's replay).

@@ -126,15 +126,17 @@ local function short(path)
 end
 
 -- pane_dir is the directory the pane's shell last reported (terminal.pwd, OSC 7), else its child's
--- cwd from the OS, else fallback. The result is canonical, or nil when the directory is gone.
+-- cwd from the OS, else its foreground's cwd, else fallback. The result is canonical, or nil when
+-- the directory is gone. A default macOS pane's child is /usr/bin/login (root): Rex reports no cwd
+-- for it, only for the login shell in the foreground (observed on Rex 0.0.1792158932-g88fd41, lab).
 local function file_url_path(url)
   local path = type(url) == 'string' and url:match('^file://[^/]*(/.*)$') or nil
   if path then path = path:gsub('%%(%x%x)', function(h) return string.char(tonumber(h, 16)) end) end
   return path
 end
-local function pane_dir(session_id, block_id, child, fallback)
+local function pane_dir(session_id, block_id, child, fg, fallback)
   local ok, pwd = pcall(rex_ok, 'com.superlogical.terminal.pwd', {session_id = session_id, block_id = block_id, args = {}})
-  for _, dir in ipairs({ok and file_url_path(pwd.pwd) or false, child.cwd or false, fallback or false}) do
+  for _, dir in ipairs({ok and file_url_path(pwd.pwd) or false, child.cwd or false, fg.cwd or false, fallback or false}) do
     if dir then
       local found, real = pcall(real_dir, dir)
       if found then return real end
@@ -167,7 +169,7 @@ local function capture(session_id)
             local ok, proc = pcall(rex_ok, 'com.superlogical.terminal.process', {session_id = session_id, block_id = id, args = {}})
             local child = ok and proc.child or {}
             local fg = ok and proc.foreground or {}
-            pane.dir = pane_dir(session_id, id, child, spec.found and spec.cwd or nil)
+            pane.dir = pane_dir(session_id, id, child, fg, spec.found and spec.cwd or nil)
             if spec.found and spec.profile ~= SHELL_PROFILE then
               pane.guess, pane.args = 'profile:' .. spec.profile, spec.args or {}
               pane.detail = spec.title
@@ -543,7 +545,7 @@ local function wake() engine.wake(); pump() end
 local function source_dir(context)
   if type(context.source_block_id) ~= 'string' or context.source_block_id == '' then return nil end
   local ok, proc = pcall(rex_ok, 'com.superlogical.terminal.process', {session_id = context.session_id, block_id = context.source_block_id, args = {}})
-  local cwd = pane_dir(context.session_id, context.source_block_id, ok and proc.child or {}, nil)
+  local cwd = pane_dir(context.session_id, context.source_block_id, ok and proc.child or {}, ok and proc.foreground or {}, nil)
   if not cwd then return nil end
   return git_root(cwd) or cwd
 end
