@@ -291,7 +291,7 @@ end
 -- (hub.forward), identified by the hub from its pane. caller = {id, ids, session_id, pid}: ids
 -- are every ID of the agent (its identity and the legacy IDs it took over), so an operation
 -- recorded under an older ID still matches. An agent may act on anything that the user can
--- (LazyRex decisions.md, 2026-10-19): there is no owner check.
+-- (decision "Agents may act on anything", 2026-10-19): there is no owner check.
 local USER = {id = 'user', ids = {'user'}}
 local function agent_caller(pid)
   if type(pid) ~= 'number' or pid <= 0 or pid % 1 ~= 0 then fail('refused', 'A positive requester PID is required') end

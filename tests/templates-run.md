@@ -86,8 +86,8 @@ decimal IDs without relying on floating-point integer precision. Spawn keys use
 `retry(id, op)` queues a blocked, pending or unknown run again. The queued state and `op` (with
 `result = {run_id, woken}`) commit in one batch, so a lost reply loses no retry. Another status
 gives `woken = false`: it keeps the run unchanged and records the operation result. `wake_one(id)` schedules one queued or starting run
-(a replayed retry). Dismiss and retry come from the user or any agent (LazyRex `decisions.md`,
-2026-10-19); the run keeps its `by` and its grant.
+(a replayed retry). Dismiss and retry come from the user or any agent (decision "Agents may act on
+anything", 2026-10-19); the run keeps its `by` and its grant.
 
 ## Agent starts and grants
 
