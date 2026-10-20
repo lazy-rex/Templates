@@ -127,7 +127,10 @@ function M.new(opts)
   local resolve_root = assert(opts.resolve_root, 'resolve_root is required')
   local resolve_dir = assert(opts.resolve_dir, 'resolve_dir is required')
   local engine, queue, queued, checked = {}, {}, {}, {}
-  local scanning, after, limit = false, nil, SCAN_LIMIT
+  -- The scan state is in a table: closures write it and pcall catches errors around them. After a
+  -- caught error, a closure's write to a captured local can be lost (LazyRex docs/rex-protocol.md,
+  -- "Rex Lua runtime"): no closure writes a captured local where a pcall can catch.
+  local scan = {active = false, after = nil, limit = SCAN_LIMIT}
   -- note bounds an error text for the run record; the full text goes to the plugin log.
   local function note(id, text)
     text = tostring(text)
@@ -453,20 +456,19 @@ function M.new(opts)
   -- limit at the next tick). Pending and unknown runs wait for a worker event, reconnect or
   -- explicit retry. A store failure also waits: no immediate retry loop.
   function engine.wake()
-    if not scanning then scanning, after, limit = true, nil, SCAN_LIMIT end
+    if not scan.active then scan.active, scan.after, scan.limit = true, nil, SCAN_LIMIT end
   end
   engine.resume = engine.wake
   function engine.tick()
-    local id
     local ok, err = pcall(function()
-      if scanning then
-        local args = {prefix='run/', limit=limit}
-        if after then args.after = after end
+      if scan.active then
+        local args = {prefix='run/', limit=scan.limit}
+        if scan.after then args.after = scan.after end
         local got, page = pcall(hub, 'hub.store.scan', args)
         if not got then
-          local next_limit = M.smaller(limit, page)
+          local next_limit = M.smaller(scan.limit, page)
           if not next_limit then error(page, 0) end
-          limit = next_limit
+          scan.limit = next_limit
           return
         end
         if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run scan') end
@@ -474,14 +476,14 @@ function M.new(opts)
           local run = record.value
           if run and (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
         end
-        after, scanning = page.next, page.next ~= nil
+        scan.after, scan.active = page.next, page.next ~= nil
         return
       end
-      id = table.remove(queue, 1)
+      local id = table.remove(queue, 1)
       if id then queued[id] = nil; advance(id) end
     end)
-    if not ok then scanning, after = false, nil end
-    return scanning or #queue > 0, not ok and err or nil
+    if not ok then scan.active, scan.after = false, nil end
+    return scan.active or #queue > 0, not ok and err or nil
   end
   return engine
 end

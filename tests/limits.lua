@@ -23,17 +23,17 @@ local function tpl(name, tabs, leaves, n)
 end
 local function size(v) return #rex.json.encode(v) end
 
-local alice
+local S = {} -- S.alice: a table field (LazyRex docs/rex-protocol.md, "Rex Lua runtime")
 -- settled waits up to 20 s until a run leaves queued, starting and authorizing, and returns its
 -- status (also when it did not leave them).
 local function settled(id)
   local ok, st = pcall(wait, 'run ' .. id .. ' settles', function()
-    local r = W.run_of(alice, id)
+    local r = W.run_of(S.alice, id)
     if r and r.status ~= 'queued' and r.status ~= 'starting' and r.status ~= 'authorizing' then return r.status end
     return nil
   end, 20)
   if ok then return st end
-  local r = W.run_of(alice, id)
+  local r = W.run_of(S.alice, id)
   return r and r.status or 'none'
 end
 local function try(tabs, leaves, n)
@@ -52,7 +52,7 @@ local function try(tabs, leaves, n)
   local ui_ok = ui_status == 'open'
   local run = store('run/' .. ui_id).value
   -- The agent's start of the same template.
-  local ok, r = pcall(alice.call, alice, 'templates.start', {template = name, root = root, key = 'agent-' .. name})
+  local ok, r = pcall(S.alice.call, S.alice, 'templates.start', {template = name, root = root, key = 'agent-' .. name})
   local agent_status = ok and settled(r.run_id) or 'refused'
   local agent_ok = agent_status == 'open'
   local agent_run = ok and store('run/' .. r.run_id).value or nil
@@ -70,7 +70,7 @@ local function try(tabs, leaves, n)
 end
 
 test('near the 64 KiB bound both paths open, or both refuse at admission; no run stays queued', function()
-  alice = agent('alice')
+  S.alice = agent('alice')
   local seen = {}
   for _, case in ipairs({{1, 1, 15000}, {1, 2, 9000}, {1, 2, 10000}, {1, 2, 11000}, {1, 3, 7000}, {3, 1, 6500}, {3, 1, 7500}}) do
     local ui_ok = try(case[1], case[2], case[3])

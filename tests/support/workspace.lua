@@ -49,9 +49,10 @@ function W.first_block(session_id) return W.blocks(session_id)[1].block_id end
 
 -- workspace: a session with tab "code" (two idle shells: api, web; ratio 0.4) and tab "logs" (one
 -- idle shell in the root). Returns the session and the root.
-local n = 0
+local count = {n = 0} -- a table field (LazyRex docs/rex-protocol.md, "Rex Lua runtime")
 function W.workspace()
-  n = n + 1
+  count.n = count.n + 1
+  local n = count.n
   local root = HOME .. '/ws' .. n
   W.mkdir(root .. '/api', root .. '/web')
   root = W.real(root)

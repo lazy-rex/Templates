@@ -6,19 +6,20 @@
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
-local k = 0
-local alice
+-- Table fields (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
+local S = {k = 0}
 local holds = {} -- active holds: a failed test must not hold the engine for the next one
 -- prepare saves a template of a new workspace and opens the Start form from that session. It
 -- returns {s, root, name, form, values, key}: values start the template in a new session.
 local function prepare()
   for id in pairs(holds) do cancel_injection(id); holds[id] = nil end
-  k = k + 1
-  alice = agent('alice')
+  S.k = S.k + 1
+  local k = S.k
+  S.alice = agent('alice')
   local s, root = W.workspace()
-  W.capture(alice, s)
+  W.capture(S.alice, s)
   local name = 'sw-' .. k
-  alice:call('templates.save', {name = name, root = root, session_id = s, key = 'sw-save-' .. k})
+  S.alice:call('templates.save', {name = name, root = root, session_id = s, key = 'sw-save-' .. k})
   local anchor = W.first_block(s)
   local form = W.open('start_session', '/forms/start', s, anchor)
   local values = W.form_input(form:render(), 'start_session')
@@ -30,7 +31,7 @@ local function notice(s)
   local w = node(W.panel(s):render(), 'switch')
   return w and w.text
 end
-local function run_named(name) return W.find(alice:call('templates.runs', {}).runs, 'template', name) end
+local function run_named(name) return W.find(S.alice:call('templates.runs', {}).runs, 'template', name) end
 -- hold makes the next run's first update fail until release: its first tab is late. release waits
 -- until the hold stopped an update (else the test proves nothing), ends it and wakes the engine.
 local function hold()
@@ -42,8 +43,8 @@ local function hold()
     cancel_injection(inj)
     holds[inj] = nil
     -- A worker change wakes the engine (hub.changed workers).
-    local w = alice:hub('hub.spawn', {profile = 'watcher', key = 'wake-' .. id})
-    alice:hub('hub.stop', {spawn_id = w.spawn_id})
+    local w = S.alice:hub('hub.spawn', {profile = 'watcher', key = 'wake-' .. id})
+    S.alice:hub('hub.stop', {spawn_id = w.spawn_id})
   end
 end
 
@@ -53,7 +54,7 @@ test('F1 one app shows the form\'s session: it switches once to the first tab', 
   a = app('sw-app-1', {sessions = {c.s}})
   local op = submit(c)
   expect(op.status).to_be('succeeded')
-  local run = W.wait_run(alice, op.result.run_id, 'open')
+  local run = W.wait_run(S.alice, op.result.run_id, 'open')
   local calls = a:calls()
   expect(#calls).to_be(1)
   expect(calls[1].action).to_be('session.select')
@@ -69,7 +70,7 @@ test('F2 a start into an existing session never switches', function()
   local a = app('sw-app-2', {sessions = {c.s}})
   c.values.session_id = c.s
   expect(submit(c).status).to_be('succeeded')
-  W.wait_run(alice, run_named(c.name).id, 'open')
+  W.wait_run(S.alice, run_named(c.name).id, 'open')
   rex.sleep(0.5)
   expect(#a:calls()).to_be(0)
   expect(W.switch_record(c.key)).to_be(nil)
@@ -132,7 +133,7 @@ test('lab 6 two apps show the form\'s session: ambiguous_app, no app is asked, t
   local c = prepare()
   local a1, a2 = app('sw-app-4', {sessions = {c.s}}), app('sw-app-5', {sessions = {c.s}})
   expect(submit(c).status).to_be('succeeded')
-  W.wait_run(alice, run_named(c.name).id, 'open')
+  W.wait_run(S.alice, run_named(c.name).id, 'open')
   expect(W.switch_record(c.key).code).to_be('ambiguous_app')
   expect(#a1:calls() + #a2:calls()).to_be(0)
   local text = notice(c.s)
@@ -172,7 +173,7 @@ test('F5 F6 the form waits and says Starting; the wait expires; the late first t
   expect(W.switch_record(c.key).code).to_be('timeout')
   expect(store('run/' .. id).value.status).to_be('queued')
   release()
-  W.wait_run(alice, id, 'open')
+  W.wait_run(S.alice, id, 'open')
   rex.sleep(1)
   expect(#a:calls()).to_be(0)
   expect(notice(c.s)).to_match('wait for the automatic switch .* expired, so the app did not switch%. When the session is available, use Go to Session')
@@ -193,7 +194,7 @@ for _, case in ipairs({{'F7 a legacy start record without at', function(v) v.at 
     case[2](rec)
     write({{key = rk, value = rec}})
     release()
-    W.wait_run(alice, id, 'open')
+    W.wait_run(S.alice, id, 'open')
     expect(c.form:settle(key, 20).status).to_be('succeeded')
     expect(W.switch_record(c.key).code).to_be('timeout')
     expect(#a:calls()).to_be(0)
@@ -220,7 +221,7 @@ test('F1 a hub restart while the form waits: the same operation replays the run 
   end, 30)
   expect(op.status).to_be('succeeded')
   expect(op.result.run_id).to_be(id)
-  W.wait_run(alice, id, 'open')
+  W.wait_run(S.alice, id, 'open')
   local sw = W.switch_record(c.key)
   local asked = sw.state == 'done' and 1 or 0
   if asked == 0 then expect(sw.state).to_be('refused') end

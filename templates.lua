@@ -540,12 +540,14 @@ local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = 
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   log = function(line) print('templates: ' .. line) end,
   changed = function() if invalidate then pcall(invalidate) end end})
-local tick_timer
 -- Ticks run outside action handlers. An error stops the loop until the next wake (contract).
+-- loop.timer is a table field: pump and its callback write it, and pcall catches errors in the
+-- handlers that call pump (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
+local loop = {timer = nil}
 local function pump()
-  if tick_timer then return end
-  tick_timer = rex.after(0.05, function()
-    tick_timer = nil
+  if loop.timer then return end
+  loop.timer = rex.after(0.05, function()
+    loop.timer = nil
     local more, err = engine.tick()
     if err then print('templates: ' .. (type(err) == 'table' and tostring(err.message or err.code) or tostring(err))) end
     if more and not err then pump() end

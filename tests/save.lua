@@ -5,9 +5,10 @@ local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 -- project: a session in a git repository. Tab "code": api | (web over busy), ratios 0.4 and 0.7.
 -- Tab "logs": log (web) over tail (the root), ratio 0.5. busy is an interactive shell that runs
 -- sleep in the foreground; tail runs sleep directly (not a shell).
-local p = 0
+local count = {p = 0} -- a table field (LazyRex docs/rex-protocol.md, "Rex Lua runtime")
 local function project()
-  p = p + 1
+  count.p = count.p + 1
+  local p = count.p
   local A = W.repo('repo-a' .. p)
   local s = W.new_session('proj' .. p, {
     {window_label = 'code', layout = W.HS(0.4, W.sh(A .. '/api', 'api'), W.VS(0.7, W.sh(A .. '/web', 'web'), W.ish(A, 'busy')))},
@@ -125,13 +126,13 @@ end)
 test('E a pane whose profile was removed keeps every option and its own profile', function()
   local alice = agent('alice')
   local w = alice:hub('hub.spawn', {profile = 'watcher', key = 'e-watcher'})
-  local block, session
-  wait('the watcher pane', function()
+  -- The callback returns the pane; it assigns no outer local (LazyRex docs/testing.md, "Waiting").
+  local pane = wait('the watcher pane', function()
     for _, x in ipairs(alice:hub('hub.workers', {}).workers) do
-      if x.spawn_id == w.spawn_id and x.block_id then block, session = x.block_id, x.session_id end
+      if x.spawn_id == w.spawn_id and x.block_id then return {block = x.block_id, session = x.session_id} end
     end
-    return block
   end, 10)
+  local block, session = pane.block, pane.session
   expect(W.find(alice:call('templates.capture', {session_id = session}).panes, 'block_id', block).guess).to_be('profile:watcher')
   write_profiles([[{"profiles": [{"id": "server", "name": "Server", "kind": "accessory", "command": ["/bin/sh", "-c", "exec sleep 100000"]}]}]])
   local form = W.open('save_template', '/forms/save', session, block)

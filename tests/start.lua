@@ -13,9 +13,10 @@ local function tiled(window)
 end
 -- A template saved from repo A: tab code = api | web (0.4), tab logs = web over the root (0.5),
 -- whose second pane runs the profile server.
-local t = 0
+local count = {t = 0} -- a table field (LazyRex docs/rex-protocol.md, "Rex Lua runtime")
 local function template(alice)
-  t = t + 1
+  count.t = count.t + 1
+  local t = count.t
   local A = W.repo('start-a' .. t)
   local s = W.new_session('start-src' .. t, {
     {window_label = 'code', layout = W.HS(0.4, W.sh(A .. '/api', 'api'), W.sh(A .. '/web', 'web'))},
@@ -142,9 +143,9 @@ test('Rex contract: session.new_window keeps a nested layout; an invalid leaf cr
   expect(#created.block_ids).to_be(4)
   local window
   for _, w in ipairs(view(s).windows) do if w.window_id == created.window_id then window = w end end
-  local index = 0
+  local seen = {index = 0} -- a table field (LazyRex docs/rex-protocol.md, "Rex Lua runtime")
   local function compare(want, got)
-    if want.block then index = index + 1; expect(got.block_id).to_be(created.block_ids[index]); return end
+    if want.block then seen.index = seen.index + 1; expect(got.block_id).to_be(created.block_ids[seen.index]); return end
     expect(got.split.direction).to_be(want.split.direction)
     expect(got.split.ratio).to_be(want.split.ratio)
     compare(want.split.before, got.split.before)
