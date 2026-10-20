@@ -70,6 +70,21 @@ local function bounded(text)
   return text:sub(1, cut) .. '…'
 end
 M.bounded = bounded
+-- Store scans. A run record can be up to 64 KiB, so a page of SCAN_LIMIT records can be over the
+-- hub's reply limit of about 1 MiB (reply_too_large). A scan then asks for the same page (same
+-- prefix and after) with half the limit, down to 1, and keeps that limit for the rest of the scan.
+-- A new scan starts at SCAN_LIMIT again. Any other error, or reply_too_large at limit 1, stops the
+-- scan. A record that the plugin wrote went through one control message of at most 64 KiB, and
+-- rex do encodes it as the hub's reply does ("<", ">" and "&" as <, 6 bytes, both). So a page
+-- of 15 such records fits, and the limits 50, 25, 12 reach a page that fits (observed on Rex
+-- 0.0.1792158932-g88fd41; a server with a smaller message limit gives the hub a smaller one). A
+-- record from another writer has no such bound.
+local SCAN_LIMIT = 50
+M.SCAN_LIMIT = SCAN_LIMIT
+-- smaller returns the limit for the next try of a page that failed with err, or nil to stop.
+function M.smaller(limit, err)
+  if type(err) == 'table' and err.code == 'reply_too_large' and limit > 1 then return math.floor(limit / 2) end
+end
 local function message(err)
   return type(err) == 'table' and (err.message or err.code or 'Request failed') or tostring(err)
 end
@@ -116,7 +131,7 @@ function M.new(opts)
   local resolve_root = assert(opts.resolve_root, 'resolve_root is required')
   local resolve_dir = assert(opts.resolve_dir, 'resolve_dir is required')
   local engine, queue, queued, checked = {}, {}, {}, {}
-  local scanning, after = false, nil
+  local scanning, after, limit = false, nil, SCAN_LIMIT
   -- note bounds an error text for the run record; the full text goes to the plugin log.
   local function note(id, text)
     text = tostring(text)
@@ -438,19 +453,26 @@ function M.new(opts)
     if run.status == 'queued' or owes_revoke(run) then enqueue(id) end
   end
 
-  -- Wake scans one store page per tick. Pending and unknown runs wait for a worker event,
-  -- reconnect or explicit retry. A store failure also waits: no immediate retry loop.
+  -- Wake scans one store page per tick (one try: a reply_too_large retries the page with a smaller
+  -- limit at the next tick). Pending and unknown runs wait for a worker event, reconnect or
+  -- explicit retry. A store failure also waits: no immediate retry loop.
   function engine.wake()
-    if not scanning then scanning, after = true, nil end
+    if not scanning then scanning, after, limit = true, nil, SCAN_LIMIT end
   end
   engine.resume = engine.wake
   function engine.tick()
     local id
     local ok, err = pcall(function()
       if scanning then
-        local args = {prefix='run/', limit=50}
+        local args = {prefix='run/', limit=limit}
         if after then args.after = after end
-        local page = hub('hub.store.scan', args)
+        local got, page = pcall(hub, 'hub.store.scan', args)
+        if not got then
+          local next_limit = M.smaller(limit, page)
+          if not next_limit then error(page, 0) end
+          limit = next_limit
+          return
+        end
         if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run scan') end
         for _, record in pairs(page.records) do
           local run = record.value

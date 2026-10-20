@@ -189,17 +189,29 @@ local function capture(session_id)
   return result
 end
 
+-- scan_all returns the values (tables) of every record under prefix. A page that is too large for
+-- a hub reply is asked for again with a smaller limit (templates_run.lua, "Store scans").
+local function scan_all(prefix)
+  local list, after, limit = {}, nil, run_module.SCAN_LIMIT
+  repeat
+    local args = {prefix = prefix, limit = limit}
+    if after then args.after = after end
+    local ok, page = pcall(hub, 'hub.store.scan', args)
+    if ok then
+      for _, record in pairs(page.records or {}) do if type(record.value) == 'table' then list[#list + 1] = record.value end end
+      after = page.next
+    else
+      limit = run_module.smaller(limit, page)
+      if not limit then error(page, 0) end
+    end
+  until ok and not after
+  return list
+end
+
 -- Storage: template/<hex name> = {v = 1, name, tabs}. hex keeps any name a valid key.
 local function template_key(name) return 'template/' .. hex(name) end
 local function templates()
-  local list, after = {}, nil
-  repeat
-    local args = {prefix = 'template/', limit = 50}
-    if after then args.after = after end
-    local page = hub('hub.store.scan', args)
-    for _, record in pairs(page.records or {}) do if type(record.value) == 'table' then list[#list + 1] = record.value end end
-    after = page.next
-  until not after
+  local list = scan_all('template/')
   table.sort(list, function(a, b) return a.name < b.name end)
   return list
 end
@@ -717,14 +729,7 @@ end
 
 -- Templates panel: saved templates and recent starts.
 local function recent_runs()
-  local runs, after = {}, nil
-  repeat
-    local args = {prefix = 'run/', limit = 50}
-    if after then args.after = after end
-    local page = hub('hub.store.scan', args)
-    for _, record in pairs(page.records or {}) do if type(record.value) == 'table' then runs[#runs + 1] = record.value end end
-    after = page.next
-  until not after
+  local runs = scan_all('run/')
   table.sort(runs, function(a, b) return #a.id > #b.id or #a.id == #b.id and a.id > b.id end)
   return runs
 end

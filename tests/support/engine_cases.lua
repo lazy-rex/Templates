@@ -17,7 +17,7 @@ local function expect_error(fn, code)
   assert(not ok and type(err) == 'table' and err.code == code, 'Expected ' .. code)
 end
 local function fixture()
-  local f = {records={}, rev=0, creates=0, sessions=0, calls={}, windows={}}
+  local f = {records={}, rev=0, creates=0, sessions=0, calls={}, windows={}, scans={}}
   function f.hub(action, args)
     if action == 'hub.store.get' then
       local out = {}; for _, key in ipairs(args.keys) do out[key] = copy(f.records[key] or {rev='0'}) end
@@ -37,9 +37,18 @@ local function fixture()
       if f.lose_store then f.lose_store = nil; error('lost committed store reply') end
       return {revs=revs}
     elseif action == 'hub.store.scan' then
-      local out = {}
-      for k, v in pairs(f.records) do if k:sub(1, #args.prefix) == args.prefix then out[k] = copy(v) end end
-      return {records=out}
+      -- Pages as the hub does: keys in order after args.after, at most args.limit, next = the
+      -- last key of a page that has more. f.scan_fail(args) can fail a call with an error.
+      f.scans[#f.scans + 1] = {limit=args.limit, after=args.after}
+      if f.scan_fail then local err = f.scan_fail(args); if err then error(err, 0) end end
+      local keys = {}
+      for k in pairs(f.records) do
+        if k:sub(1, #args.prefix) == args.prefix and (not args.after or k > args.after) then keys[#keys + 1] = k end
+      end
+      table.sort(keys)
+      local out, limit = {}, args.limit or 500
+      for i = 1, math.min(#keys, limit) do out[keys[i]] = copy(f.records[keys[i]]) end
+      return {records=out, next=#keys > limit and keys[limit] or nil}
     elseif action == 'hub.session.ensure' then
       if not f.session then f.sessions = f.sessions + 1; f.session = 'session:1' end
       if f.lose_session then f.lose_session = nil; error('unknown session outcome') end
@@ -374,6 +383,67 @@ function tests.an_oversized_id_from_the_hub_is_an_invalid_result()
   drain(e)
   local got=e.get(run.id)
   assert(got.status == 'blocked' and got.error:find('Invalid tab start result', 1, true), got.status)
+end
+-- Store scans (templates_run.lua, "Store scans"). admitted makes count runs that a new engine (a
+-- plugin restart) must find by its scan: the first engine never ticks.
+local function admitted(f, count)
+  local e = f.engine()
+  for i = 1, count do e.admit(request('scan-' .. i)) end
+end
+local too_large = {code='reply_too_large', message='reply too large'}
+local function limits(f)
+  local out = {}
+  for i, s in ipairs(f.scans) do out[i] = s.limit end
+  return out
+end
+function tests.a_scan_halves_its_limit_on_reply_too_large_and_keeps_its_cursor()
+  local f=fixture(); admitted(f, 5)
+  -- A page of more than 3 records is too large.
+  f.scan_fail=function(args) if args.limit > 3 then return too_large end end
+  local e=f.engine(); e.resume()
+  -- One scan call per tick at most.
+  for i=1, 60 do
+    local before=#f.scans
+    local more, err = e.tick(); assert(not err, tostring(err))
+    assert(#f.scans - before <= 1, 'more than one scan call in a tick')
+    if not more then break end
+  end
+  assert(equal(limits(f), {50, 25, 12, 6, 3, 3}), table.concat(limits(f), ','))
+  -- The same page is asked again (same after) until it passes; then the cursor moves on.
+  for i=1, 5 do assert(f.scans[i].after == nil, 'cursor moved before a page passed') end
+  assert(f.scans[6].after == 'run/3')
+  -- Every run was found once and opened once (2 tabs each).
+  for i=1, 5 do assert(e.get(tostring(i)).status == 'open', 'run ' .. i) end
+  assert(f.creates == 10, 'creates ' .. f.creates)
+  -- A new scan starts at the full limit again.
+  f.scans, f.scan_fail = {}, nil
+  e.wake(); drain(e)
+  assert(f.scans[1].limit == Run.SCAN_LIMIT)
+end
+function tests.a_scan_does_not_retry_another_error()
+  local f=fixture(); admitted(f, 1)
+  f.scan_fail=function() return {code='unavailable', message='store unavailable'} end
+  local e=f.engine(); e.resume()
+  local more, err = e.tick()
+  assert(err and err.code == 'unavailable' and not more, 'the error stops the scan')
+  assert(not select(1, e.tick()) and #f.scans == 1, 'no retry before a wake')
+  f.scan_fail=nil; e.wake(); drain(e)
+  assert(e.get('1').status == 'open')
+end
+function tests.a_scan_stops_when_a_page_of_one_is_too_large()
+  local f=fixture(); admitted(f, 1)
+  f.scan_fail=function() return too_large end
+  local e=f.engine(); e.resume()
+  local errors = 0
+  for i=1, 20 do
+    local more, err = e.tick()
+    if err then errors = errors + 1; assert(err.code == 'reply_too_large') end
+    if not more then break end
+  end
+  assert(errors == 1, 'the error is returned once')
+  assert(equal(limits(f), {50, 25, 12, 6, 3, 1}), table.concat(limits(f), ','))
+  assert(not select(1, e.tick()) and #f.scans == 6, 'no scan after the stop')
+  assert(e.get('1').status == 'queued')
 end
 function tests.admission_refuses_an_invalid_session_id()
   local f=fixture(); local e=f.engine()
