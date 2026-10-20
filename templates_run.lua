@@ -75,7 +75,7 @@ M.bounded = bounded
 -- prefix and after) with half the limit, down to 1, and keeps that limit for the rest of the scan.
 -- A new scan starts at SCAN_LIMIT again. Any other error, or reply_too_large at limit 1, stops the
 -- scan. A record that the plugin wrote went through one control message of at most 64 KiB, and
--- rex do encodes it as the hub's reply does ("<", ">" and "&" as <, 6 bytes, both). So a page
+-- rex do encodes it as the hub's reply does ("<", ">" and "&" as \u003c, 6 bytes, both). So a page
 -- of 15 such records fits, and the limits 50, 25, 12 reach a page that fits (observed on Rex
 -- 0.0.1792158932-g88fd41; a server with a smaller message limit gives the hub a smaller one). A
 -- record from another writer has no such bound.

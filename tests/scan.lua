@@ -1,7 +1,7 @@
 -- Store scans of run and template records: a page of records must fit in one hub reply (about
 -- 1 MiB), and a record can be up to 64 KiB. A scan asks for a page again with half the limit
 -- after reply_too_large (templates_run.lua, "Store scans"). The records here are padded with "<":
--- rex do and the hub both encode it as < (6 bytes), so 10 000 "<" are about 60 KB written
+-- rex do and the hub both encode it as \u003c (6 bytes), so 10 000 "<" are about 60 KB written
 -- and in a reply. Tests in this file share one hub: each one uses its own record IDs and names.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')

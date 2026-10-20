@@ -8,7 +8,7 @@ local function quiet(a)
   rex.sleep(0.5)
 end
 
--- The encoding that the scan limits depend on: rex do writes "<" as < (6 bytes), as the hub's
+-- The encoding that the scan limits depend on: rex do writes "<" as \u003c (6 bytes), as the hub's
 -- reply does (observed on Rex 0.0.1792158932-g88fd41).
 test('rex do encodes "<" as 6 bytes', function()
   expect(rex.json.encode('<')).to_be('"\\u003c"')
