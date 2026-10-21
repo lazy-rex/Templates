@@ -844,6 +844,55 @@ function tests.retention_the_retirement_batch_is_small_with_the_largest_keys()
   fits('the retirement write', frame(retire), 4096)
 end
 
+-- switch_settled (the plugin's retirable): a user start into a new session waits for its switch
+-- decision, or for the bound after the form's submit.
+function tests.switch_settled_waits_for_a_final_switch_decision_or_the_bound()
+  local run = {request={key='k', new_session_name='S'}}
+  local form = {rev='5', value={fingerprint='fp', at=1000}}
+  local S = Run.switch_settled
+  assert(not S(run, form, {rev='0'}, 1010, 78), 'no decision, within the bound: wait')
+  assert(not S(run, form, {rev='6', value={state='attempted'}}, 1010, 78), 'attempted: wait')
+  assert(not S(run, form, {rev='6', value={state='other'}}, 1010, 78), 'an unknown state is not final')
+  for _, state in ipairs({'done', 'refused', 'unknown'}) do
+    assert(S(run, form, {rev='6', value={state=state}}, 1010, 78), state .. ' is final')
+  end
+  assert(S(run, form, {rev='0'}, 1078, 78), 'no decision at the bound: retirable')
+  assert(S(run, form, {rev='6', value={state='attempted'}}, 1078, 78), 'attempted at the bound: retirable')
+  assert(S(run, {rev='5', value={fingerprint='fp'}}, {rev='0'}, 1010, 78), 'a form without at never switches')
+  assert(S(run, {rev='5', value={fingerprint='fp', at='x'}}, {rev='0'}, 1010, 78), 'an invalid at never switches')
+  assert(S(run, {rev='0'}, nil, 1010, 78), 'no form record: nothing switches')
+  assert(S({request={key='k', session_id='session:1'}}, form, {rev='0'}, 1010, 78), 'an existing session: no switch')
+  assert(S({request={key='k', new_session_name='S', by='alice'}}, form, {rev='0'}, 1010, 78), 'an agent start: no switch')
+end
+
+function tests.retention_a_postponed_step_retires_later_by_its_timer_and_does_not_block_starts()
+  local f = fixture()
+  seed_open(f, 1, 201)
+  put(f, 'run-counter', '300')
+  local asked = {}
+  local e = f.engine({form_key=RKEYS.form_key, switch_key=RKEYS.switch_key, retirable=function(run, form, switch, now)
+    asked[#asked + 1] = {id=run.id, form=form, switch=switch, now=now}
+    return now >= f.settle_at
+  end})
+  f.settle_at = f.now + 100
+  e.resume(); rdrain(e)
+  assert(f.records['run/1'] ~= nil and f.records['run-key/k1'].value.expired_at == nil, 'postponed')
+  assert(#asked == 1 and asked[1].id == '1' and asked[1].form.rev == f.records['start-form/k1'].rev, 'asked with the fresh records')
+  -- A new start opens while the step waits.
+  local run = e.admit(request('new-start')); rdrain(e)
+  assert(e.get(run.id).status == 'open', 'starts are not blocked')
+  -- The step is tried again after RETRY_DELAY, by its timer (no other wake).
+  local wakes = f.wakes
+  f.fire(f.now + Run.RETRY_DELAY)
+  assert(f.wakes == wakes + 1, 'the timer wakes the pump')
+  rdrain(e)
+  assert(f.records['run/1'] ~= nil and #asked >= 2, 'still within the bound')
+  f.fire(f.now + Run.RETRY_DELAY); rdrain(e)
+  assert(f.records['run/1'] == nil and f.records['run-key/k1'].value.id == '1', 'retired after the bound')
+  -- The new start made run 2 the oldest over 200.
+  assert(f.records['run/2'] == nil and present(f, 3, 201) == 199)
+end
+
 -- A step due now supersedes the timer of a later step (one timer: the earliest). Its timer fires
 -- after the step ran; the ticks that follow read scan pages (a wake), which run no maintenance.
 -- The later step must still get a timer.

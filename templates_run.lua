@@ -125,6 +125,8 @@ local function owes_grant_check(run) return finished(run) and by_agent(run) and 
 -- days", 2026-10-20; tests/templates-run.md, "Retention"). A run is eligible when it is finished,
 -- owes no revoke, and is a user run or has a recorded grant (an agent run without one is the
 -- evidence that find_grant uses). A run is retired when at least KEEP newer eligible runs exist.
+-- opts.retirable can postpone a retirement (the plugin waits for a Start form's switch decision:
+-- switch_settled); the step is tried again RETRY_DELAY seconds later, so retirement is eventual.
 -- Newer runs get higher IDs and only older runs are retired, so the rank of a run only grows.
 -- Retirement replaces run-key/<key> with a marker {id, expired_at, form_rev} and deletes run/<id>
 -- and the switch record, in one batch with if_rev on each record. The start-form record stays: it
@@ -148,6 +150,20 @@ end
 function M.form_expired(form, marker, now)
   return type(form) == 'table' and type(marker) == 'table' and M.expired(marker.value, now)
     and marker.value.form_rev ~= nil and marker.value.form_rev == form.rev
+end
+-- switch_settled: a user start into a new session has a Start form that switches the app once
+-- (templates.lua, switch_app). Its run is retirable only when the switch decision is final (a
+-- switch record that is not 'attempted'), or when the form record is at least bound seconds old
+-- (the form was closed, or the decision was lost). A form record without a valid at is from
+-- before the switch: it never switches. Other starts never switch.
+local FINAL = {done = true, refused = true, unknown = true}
+function M.switch_settled(run, form, switch, now, bound)
+  if by_agent(run) or not run.request.new_session_name then return true end
+  local s = switch and switch.value
+  if type(s) == 'table' and FINAL[s.state] then return true end
+  local f = form and form.value
+  if type(f) ~= 'table' or type(f.at) ~= 'number' then return true end
+  return now - f.at >= bound
 end
 
 function M.new(opts)
@@ -556,6 +572,8 @@ function M.new(opts)
       return
     end
     local f, s = fkey and got[fkey], skey and got[skey]
+    -- opts.retirable (the plugin: switch_settled) can postpone the step: it is tried again later.
+    if opts.retirable and not opts.retirable(copy(r.value), f and copy(f), s and copy(s), now()) then return 'later' end
     local marker = {id = id, expired_at = now()}
     if f and f.value ~= nil then marker.form_rev = f.rev end
     local ops = {{key = 'run/' .. id, if_rev = r.rev, delete = true}, {key = rkey, if_rev = k.rev, value = marker}}
@@ -605,7 +623,7 @@ function M.new(opts)
     end
   end
   local function step(item)
-    if item.kind == 'retire' then retire(item.id) else expire(item.key, item.expect) end
+    if item.kind == 'retire' then return retire(item.id) else expire(item.key, item.expect) end
   end
   -- due_step returns the index of the first step that is due, or nil.
   local function due_step(t)
@@ -619,11 +637,14 @@ function M.new(opts)
     local i = due_step(t)
     if i then
       local item = table.remove(maint.items, i)
-      local ok, err = pcall(step, item)
-      if not ok then
+      local ok, result = pcall(step, item)
+      if ok and result == 'later' then
         item.due = t + RETRY_DELAY
         queue_step(item)
-        if opts.log then pcall(opts.log, 'maintenance ' .. item.kind .. ' ' .. tostring(item.id or item.key) .. ': ' .. message(err)) end
+      elseif not ok then
+        item.due = t + RETRY_DELAY
+        queue_step(item)
+        if opts.log then pcall(opts.log, 'maintenance ' .. item.kind .. ' ' .. tostring(item.id or item.key) .. ': ' .. message(result)) end
       end
       return
     end

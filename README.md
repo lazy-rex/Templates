@@ -25,9 +25,12 @@ views and agent outputs have a size limit:
 
 Templates keeps every unfinished start and the newest 200 eligible finished starts. An older
 finished start is removed. Eligible: finished, no grant revoke owed, and a user start or an agent
-start with a recorded grant. A replay of a removed start's key within 30 days of the removal gives
-`expired`; after 30 days the key starts a new start. A resubmit of a completed Start form returns
-its saved result from the hub. Details: `tests/templates-run.md`, "Retention".
+start with a recorded grant. A start from the Start form into a new session is removed only after
+its app switch is decided, or `switch_wait` + 60 s after the submit: removal is eventual. A replay
+of a removed start's key within 30 days of the removal gives `expired`; after 30 days the key starts
+a new start. A Start form that runs again after its start was removed gets that start's ID, with no
+new start and no switch. A resubmit of a completed Start form returns its saved result from the
+hub. Details: `tests/templates-run.md`, "Retention".
 
 ## Install
 

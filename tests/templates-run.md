@@ -149,9 +149,23 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   is absent, or after its marker expired, so it cannot change while `run-key/<key>` names the live
   run. This holds for the writers of Templates, not for another writer of the store. Hub revisions
   never reset (`hub/cmd/hub/store.go`, `nextRev`).
+- **Switch wait.** A user start into a new session has a Start form that switches the app once
+  (`switch_app`). The form stays open until that decision. Its run is retired only when the switch
+  record has a final state (`done`, `refused` or `unknown`), or when the `start-form` record is at
+  least `switch_wait` + 60 s old (the form was closed, or the decision was lost). A missing or
+  `attempted` switch record waits for that bound. A `start-form` record without a valid `at` is from
+  before the switch: it never switches, so its run is retirable. Agent starts and starts into an
+  existing session never switch. A step that must wait is tried again 60 s later, by its timer
+  (`switch_settled` in `templates_run.lua`; the plugin gives it as the engine option `retirable`).
+  So retirement is eventual: after the bound, and then at the next try.
 - **Replay.** An agent replay of a retired key within 30 days: `expired` (same arguments) or
   `operation_conflict` (other arguments). A legacy run without a `start-form` record has a marker
   without `form_rev`: a replay writes a new record and gets `expired`.
+  A Start form operation that runs again after its run was retired (a late poll, or the operation
+  again after a hub restart) gets the retired run's ID: no new run, no new session, no switch. Its
+  fingerprint must match, and the marker's `form_rev` must be the rev of its `start-form` record.
+  The 60 s bound is a policy delay, not proof that every poll ended: this replay rule makes a late
+  poll safe. Only the user path has it; an agent replay gets `expired`.
 - **Expiry.** A marker expires 30 days after `expired_at` (`now - expired_at >= 30 * 86400`). The
   check is on each use, before the fingerprint check: in the agent's alias lookup, in `start_core`
   and in `engine.admit`. A `start-form` record counts as absent only when its marker has expired

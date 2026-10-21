@@ -544,11 +544,18 @@ local invalidate
 local loop = {timer = nil, pump = nil}
 local function form_key(key) return 'start-form/' .. hex(key) end
 local function switch_key(start_key) return 'switch/' .. hex(start_key) end
+-- SWITCH_WAIT: the Start form's switch wait (switch_app). A run with a form that can still switch
+-- is retired only after its switch decision, or SWITCH_WAIT + SWITCH_GRACE seconds after the
+-- form's submit (switch_settled, templates_run.lua). The grace is a policy delay, not proof that
+-- every poll has ended: a later poll gets the retired run's ID (start_core).
+local SWITCH_WAIT = tonumber(rex.args.switch_wait) or 15 -- tests pass a shorter wait
+local SWITCH_GRACE = 60
 local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = resolve_root, resolve_dir = resolve_dir,
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   log = function(line) print('templates: ' .. line) end,
   changed = function() if invalidate then pcall(invalidate) end end,
-  form_key = form_key, switch_key = switch_key, wake = function() if loop.pump then loop.pump() end end})
+  form_key = form_key, switch_key = switch_key, wake = function() if loop.pump then loop.pump() end end,
+  retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end})
 local function pump()
   if loop.timer then return end
   loop.timer = rex.after(0.05, function()
@@ -576,7 +583,6 @@ end
 -- The decision is one-shot under the start's operation key: 'attempted' commits before the call,
 -- so a crash or lost answer after it reads as 'unknown' and never switches again. An agent's
 -- start never switches the app: it has no form.
-local SWITCH_WAIT = tonumber(rex.args.switch_wait) or 15 -- tests pass a shorter wait
 local starting = {} -- view_id -> true while its start form waits (render only)
 local function switch_app(view_id, start_key, run_id, at)
   local skey = switch_key(start_key)
@@ -634,6 +640,13 @@ local function start_core(caller, key, fingerprint, intent)
   -- check): the key starts a new run, and the new record replaces it (if_rev).
   if saved and type(saved.value) == 'table' and not run_module.form_expired(saved, got[marker_key], os.time()) then
     if saved.value.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
+    -- A Start form that runs again after its run was retired (a late poll, or the operation again
+    -- after a hub restart) gets that run's ID: no new run, no switch. The marker must name this
+    -- form record (form_rev). An agent's replay gets expired (engine.admit).
+    local m = got[marker_key] and got[marker_key].value
+    if caller.id == 'user' and type(m) == 'table' and m.expired_at ~= nil and m.form_rev ~= nil and m.form_rev == saved.rev then
+      return saved.value.request, {id = m.id, retired = true}
+    end
     -- A record from before the switch has no time: its wait is over.
     request, at = saved.value.request, type(saved.value.at) == 'number' and saved.value.at or 0
   else
@@ -682,6 +695,10 @@ local function start_session(args)
   else intent.session_id = text(values.session_id, 'Session') end
   local request, run_state, at = start_core(USER, key, values_fingerprint('start-v1/', context, values), intent)
   local done = {panel = {route = '/panels/templates'}, run_id = run_state.id}
+  if run_state.retired then
+    if type(args.view_id) == 'string' then starting[args.view_id] = nil end
+    return done
+  end
   -- "Add to existing session" never switches: the first new tab already has the focus there.
   if not request.new_session_name then return done end
   local view_id = text(args.view_id, 'view ID')
