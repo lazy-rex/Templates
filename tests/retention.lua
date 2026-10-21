@@ -226,6 +226,39 @@ test('a run is not retired while its Start form waits for the switch: the form s
   a:close()
 end)
 
+-- The same with one shell tab (Codex's probe): the first tab opens as the run finishes, so the run
+-- is eligible when the switch can happen. The test holds the run's first update while it writes
+-- the 200 newer runs, then releases it. Before the fix the step retired the run before the form's
+-- next poll, and that poll failed with expired.
+test('one tab: a run is not retired before its Start form\'s switch; the form succeeds with one session', function()
+  local alice = agent('alice')
+  local s, root = W.workspace()
+  write({{key = 'template/' .. W.hex('ret-single'), value = {v = 1, name = 'ret-single',
+    tabs = {{title = 'shell', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  local form = W.open('start_session', '/forms/start', s)
+  local values = W.form_input(form:render(), 'start_session')
+  values.template, values.root, values.session_id = 'ret-single', root, '@new'
+  local a = app('ret-app-single', {sessions = {s}})
+  local before = session_count()
+  local id = W.next_run_id()
+  local hold = inject({match = {updates = 'run/' .. id}, fail = 'held by the test', times = 'always'})
+  local _, key = form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = 'ret-single'})
+  wait('the held first update', function() return injection(hold).consumed >= 1 end, 10)
+  newer(alice, id)
+  cancel_injection(hold)
+  local w = alice:hub('hub.spawn', {profile = 'watcher', key = 'ret-single-wake'})
+  alice:hub('hub.stop', {spawn_id = w.spawn_id})
+  local op = form:settle(key, 30)
+  expect(op.status).to_be('succeeded')
+  expect(op.result.run_id).to_be(id)
+  expect(#a:calls() <= 1).to_be(true)
+  expect(session_count()).to_be(before + 1)
+  wait('run ' .. id .. ' retired', function() return store('run/' .. id).value == nil end, 150)
+  expect(operation(key).result.run_id).to_be(id)
+  expect(session_count()).to_be(before + 1)
+  a:close()
+end)
+
 -- Constructed: the run was retired while its form operation still runs, and the hub restarts (it
 -- runs the operation again). The test holds the run's first update, so no session ever opened:
 -- this proves that the replay makes no run, no session and no switch, not that a session opened.
