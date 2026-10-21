@@ -23,6 +23,9 @@ views and agent outputs have a size limit:
   at another root, with a longer encoded root, session name or folder, can still be refused at
   start. Details: `tests/templates-run.md`, "Save size".
 - The Save as Template form view has no size limit yet.
+- A save keeps a template with the same name. To replace it, choose "Replace it" in the Save
+  form, or pass `replace` (the `rev` from `templates.get`) to `templates.save`. Details:
+  `tests/templates-run.md`, "Replace".
 - A template row in the panel opens a menu (Start session…, Delete…). Delete asks for a
   confirmation and deletes only the revision that you chose. A row with a name over about 500
   bytes has no action: use `templates.get` or `templates.delete`. Details: `tests/templates-run.md`,

@@ -224,6 +224,30 @@ template. Code: `templates.lua`, `menu_view`, `delete_view`, `delete_ui`. Tests:
   keypress in the renderer (untested).
 - The agent tool `templates.delete` does not change: it deletes by name, with no confirmation.
 
+## Replace
+
+A save keeps an existing template with the same name (`conflict`), unless the caller chooses to
+replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
+
+- **Agent.** `templates.get` gives `{template, rev}`, both from one record response. `rev` is a
+  decimal string. `templates.save` with `replace = rev` replaces exactly that revision: one batch
+  with `if_rev = rev`, with no read. A template that changed or was deleted since gives `conflict`,
+  and a name with no record gives `conflict`. `replace` is a canonical nonzero revision (no `0`, no
+  leading zero, at most 20 digits), else `invalid_input`.
+- **Form.** The field "If a template has this name" is "Keep it (do not save)" (`keep`, the
+  default) or "Replace it" (`replace`). It authorizes the replacement of the record as it is at the
+  submit, not as it was when the form opened. The submit reads the record once, after the capture
+  and the size check and just before the batch, and writes with that `if_rev` (`'0'` when absent:
+  a new save). A record replaced or deleted between the read and the batch gives `conflict`; the
+  submit does not retry. A new submit reads the new state. A missing field (a form of an older
+  plugin) means `keep`; another value is `invalid_input`.
+- **Unchanged.** The operation and the template commit in one batch. A replay answers before the
+  capture and every check. An omitted `replace` leaves the agent fingerprint as before, and a form
+  without the field keeps its fingerprint. The save size check runs before the write: a refused
+  replacement leaves the old template and its rev. `saved_by` is the new saver.
+- **Other features.** A delete confirmation of the old revision gets `conflict` and then shows no
+  submit ("Panel delete"). A start that is running keeps its frozen template.
+
 ## Save form renders
 
 The hub renders every open view of the plugin again after each store commit, each

@@ -266,6 +266,14 @@ local function display(s)
   while cut > 0 and s:byte(cut + 1) >= 0x80 and s:byte(cut + 1) < 0xC0 do cut = cut - 1 end
   return s:sub(1, cut) .. '…'
 end
+-- named cuts a name for a message: at most 60 bytes on a UTF-8 boundary, no control characters.
+local function named(name)
+  name = name:gsub('%c', ' ')
+  if #name <= 60 then return '"' .. name .. '"' end
+  local cut = 57
+  while cut > 0 and cut > 54 and name:byte(cut + 1) >= 0x80 and name:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+  return '"' .. name:sub(1, cut) .. '…"'
+end
 -- Template routes (the panel's navigation). Each is an exact pattern; the hex must be the
 -- lowercase hex of a name and the rev 1 to 20 digits. A route over ROUTE_MAX bytes is not used:
 -- the panel row of such a template has no action.
@@ -315,6 +323,8 @@ local function save_fields(cap, session_label)
   local fields = {
     {id = 'name', label = 'Template name', kind = 'text', required = true, value = session_label or ''},
     {id = 'root', label = 'Root (panes are saved relative to it)', kind = 'text', required = true, value = common_root(dirs) or ''},
+    {id = 'replace', label = 'If a template has this name', kind = 'select', required = true, value = 'keep',
+      options = {{value = 'keep', label = 'Keep it (do not save)'}, {value = 'replace', label = 'Replace it'}}},
   }
   local profile_options = {{value = '@choose', label = 'Choose…'}, {value = '@skip', label = 'Leave out'}, {value = 'shell', label = 'Shell'}}
   for _, p in ipairs(profiles()) do profile_options[#profile_options + 1] = {value = 'profile:' .. p.id, label = p.name or p.id} end
@@ -471,9 +481,17 @@ local start_size
 -- Save. The form submit and templates.save call save_core. values are the form's values
 -- ({name, root, pane_<block> = choice}); fill = true takes the capture's guess for a pane that
 -- has no value (the agent path), else such a pane means the session changed (the form path).
-local function save_core(caller, keys, fingerprint, session_id, values, fill)
+-- replace (tests/templates-run.md, "Replace"): nil keeps an existing template (conflict); {rev = r}
+-- replaces exactly revision r (the agent path); {form = v} is the form's field: nil or "keep" keeps,
+-- "replace" replaces the record as it is at the submit.
+local function save_core(caller, keys, fingerprint, session_id, values, fill, replace)
   local prior = prior_op(keys, fingerprint)
   if prior then return prior end
+  local latest = false
+  if replace and replace.rev == nil then
+    if replace.form == 'replace' then latest = true
+    elseif replace.form ~= nil and replace.form ~= 'keep' then fail('invalid_input', 'If a template has this name: choose keep or replace') end
+  end
   local name = text(values.name, 'Template name')
   if #name > 60 then fail('invalid_input', 'The template name is at most 60 characters') end
   local root = resolve_root(values.root)
@@ -523,20 +541,37 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill)
   -- saved_by: who saved it (information only; anyone may delete it).
   local template = {v = 1, name = name, tabs = tabs, saved_by = caller.id}
   local tkey = template_key(name)
-  local existing = hub('hub.store.get', {keys = {tkey}}).records[tkey]
-  if existing and existing.value ~= nil then fail('conflict', 'A template named "' .. name .. '" exists. Choose another name, or delete it in Templates.') end
+  -- The revision that the batch replaces: the agent's, with no read; else the record at the submit
+  -- ('0' when absent: a new save). The read comes after the capture and the size check, just
+  -- before the batch. A conflicting batch is not retried.
+  local if_rev = replace and replace.rev
+  if not if_rev then
+    local existing = hub('hub.store.get', {keys = {tkey}}).records[tkey]
+    local present = existing and existing.value ~= nil
+    if present and not latest then
+      fail('conflict', 'A template named ' .. named(name) .. ' exists. Choose another name, or ' ..
+        (caller.id == 'user' and 'choose Replace it.' or 'replace it: templates.get gives its rev.'))
+    end
+    if_rev = present and existing.rev or '0'
+  end
   local result = caller.id == 'user' and {close_form = true} or {name = name}
-  local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = existing and existing.rev or '0', value = template}},
+  local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = if_rev, value = template}},
     op = {key = keys[1], fingerprint = fingerprint, result = result}})
   if stored.op_exists then return prior_op(keys, fingerprint) end
-  if stored.conflict then fail('conflict', 'A template with this name was saved meanwhile. Choose another name.') end
+  if stored.conflict then
+    if replace and replace.rev then
+      fail('conflict', 'The template ' .. named(name) .. ' changed or was deleted after you read it. Read it again with templates.get.')
+    end
+    if latest then fail('conflict', 'The template ' .. named(name) .. ' changed or was deleted meanwhile. Submit again to replace it.') end
+    fail('conflict', 'A template with this name was saved meanwhile. Choose another name.')
+  end
   return result
 end
 
 local function save_template(args)
   local context = context_of(args)
   local values = form_values(args)
-  return save_core(USER, op_keys('save', USER, args.operation_key), values_fingerprint('save-v2/', context, values), context.session_id, values, false)
+  return save_core(USER, op_keys('save', USER, args.operation_key), values_fingerprint('save-v2/', context, values), context.session_id, values, false, {form = values.replace})
 end
 
 -- templates.save {name, root, session_id?, panes?, key}. panes maps a block ID to 'shell',
@@ -544,7 +579,7 @@ end
 -- covers the raw arguments (an omitted session is 'default'), so a retry answers before anything
 -- live is read.
 local function agent_save(caller, args)
-  only(args, {name = true, root = true, session_id = true, panes = true, key = true})
+  only(args, {name = true, root = true, session_id = true, panes = true, replace = true, key = true})
   text(args.name, 'name'); text(args.root, 'root'); opt_text(args.session_id, 'session_id')
   if args.panes ~= nil then
     if type(args.panes) ~= 'table' then fail('invalid_input', 'panes must be an object') end
@@ -555,7 +590,14 @@ local function agent_save(caller, args)
       end
     end
   end
-  local fingerprint = 'save-agent-v1/' .. canon({name = args.name, root = args.root, session_id = args.session_id or false, panes = args.panes or {}})
+  -- replace: a canonical nonzero revision from templates.get, kept as text. An omitted replace
+  -- leaves the fingerprint as it was before replace existed.
+  if args.replace ~= nil and (type(args.replace) ~= 'string' or #args.replace > 20 or not args.replace:match('^[1-9]%d*$')) then
+    fail('invalid_input', 'replace is the rev that templates.get gives (a decimal number without leading zeros, not 0)')
+  end
+  local fp_args = {name = args.name, root = args.root, session_id = args.session_id or false, panes = args.panes or {}}
+  if args.replace ~= nil then fp_args.replace = args.replace end
+  local fingerprint = 'save-agent-v1/' .. canon(fp_args)
   local session_id = args.session_id or caller.session_id
   local values = {name = args.name, root = args.root}
   for id, choice in pairs(args.panes or {}) do values['pane_' .. id] = choice == 'skip' and '@skip' or choice end
@@ -564,7 +606,7 @@ local function agent_save(caller, args)
     if prior then return prior end
     fail('invalid_input', 'You have no session; set session_id')
   end
-  return save_core(caller, op_keys('save', caller, args.key), fingerprint, session_id, values, true)
+  return save_core(caller, op_keys('save', caller, args.key), fingerprint, session_id, values, true, args.replace and {rev = args.replace} or nil)
 end
 
 -- The engine and its adapter to hub.spawn_window. A user's start acts for "user"; an agent's
@@ -1350,14 +1392,6 @@ end
 -- templates.get returns one template; its encoded reply is at most GET_BUDGET bytes.
 local LIST_BUDGET, LIST_LIMIT, LIST_MAX, MAX_AFTER_JSON, GET_BUDGET = 40 * 1024, 50, 100, 8192, 60 * 1024
 local NEXT_AFTER = #',"next_after":'
--- named cuts a name for a message: at most 60 bytes on a UTF-8 boundary, no control characters.
-local function named(name)
-  name = name:gsub('%c', ' ')
-  if #name <= 60 then return '"' .. name .. '"' end
-  local cut = 57
-  while cut > 0 and cut > 54 and name:byte(cut + 1) >= 0x80 and name:byte(cut + 1) < 0xC0 do cut = cut - 1 end
-  return '"' .. name:sub(1, cut) .. '…"'
-end
 -- cursorable: the name comes back unchanged from the JSON round trip that an agent's after takes
 -- (the encoder replaces an invalid UTF-8 byte with U+FFFD, so such a name would give a cursor
 -- that sorts before its key: the list would repeat), and it is within the bound of after.
@@ -1428,7 +1462,8 @@ local function get_template(name)
   if not r or type(r.value) ~= 'table' or type(r.value.tabs) ~= 'table' then
     fail('not_found', 'The template ' .. named(name) .. ' does not exist')
   end
-  local reply = {template = {name = name, tabs = r.value.tabs, saved_by = r.value.saved_by}}
+  -- The template and its rev come from one record response; the budget counts the whole reply.
+  local reply = {template = {name = name, tabs = r.value.tabs, saved_by = r.value.saved_by}, rev = r.rev}
   local n = json_size(reply)
   if n > GET_BUDGET then
     fail('too_large', 'The template ' .. named(name) .. ' is too large to read (' .. n .. ' bytes; the limit is ' .. GET_BUDGET .. ')')
@@ -1486,15 +1521,15 @@ local exports = {
     args = {type = 'object', properties = {after = {type = 'string', description = 'A template name: list the templates after it (next_after of the previous page).'},
       limit = {type = 'integer', minimum = 1, maximum = 100, description = 'The most templates in the page (default 50).'}}, additionalProperties = false}},
   {name = 'templates.get', title = 'Get a session template',
-    description = 'Get one saved template: name, tabs (title and layout; each pane has a launch and a directory relative to the root) and saved_by. A template over about 60 KB gives too_large.',
+    description = 'Get one saved template: name, tabs (title and layout; each pane has a launch and a directory relative to the root) and saved_by. rev is the revision of the record: pass it to templates.save as replace. A template over about 60 KB gives too_large.',
     args = {type = 'object', properties = {template = {type = 'string', minLength = 1}}, required = {'template'}, additionalProperties = false}},
   {name = 'templates.capture', title = 'Capture a session for a template',
     description = 'Read what Save as Template would save from a session (default: yours): each pane with its tab, directory, launch guess (shell or profile:<id>) and profile args, the profiles, and a root guess.',
     args = {type = 'object', properties = {session_id = {type = 'string', minLength = 1}}, additionalProperties = false}},
   {name = 'templates.save', title = 'Save a session as a template',
-    description = 'Save the tabs of a session (default: yours) as a template. panes maps a block_id from templates.capture to shell, profile:<id> or skip; a pane without an entry takes its guess. Every pane must be under root.',
+    description = 'Save the tabs of a session (default: yours) as a template. panes maps a block_id from templates.capture to shell, profile:<id> or skip; a pane without an entry takes its guess. Every pane must be under root. A template with the same name is kept (conflict) unless replace is its rev from templates.get: then exactly that revision is replaced, and a template that changed or was deleted since gives conflict.',
     args = {type = 'object', properties = {name = {type = 'string', minLength = 1, maxLength = 60}, root = {type = 'string', minLength = 1},
-      session_id = {type = 'string', minLength = 1}, panes = {type = 'object', additionalProperties = {type = 'string'}}, key = key_arg},
+      session_id = {type = 'string', minLength = 1}, panes = {type = 'object', additionalProperties = {type = 'string'}}, replace = {type = 'string'}, key = key_arg},
       required = {'name', 'root', 'key'}, additionalProperties = false}},
   {name = 'templates.start', title = 'Start a session template',
     description = 'Start a template in a root directory: in an open session (session_id) or a new session (new_session, a name). With neither, a new session named after the template. The tabs open after this call returns; templates.runs shows the progress. You own the started panes. A finished start is removed when at least 200 newer eligible finished starts exist (eligible: finished, no revoke owed, and a user start or an agent start with a recorded grant). A replay of a removed start\'s key within 30 days of its removal gives expired; after 30 days the key starts a new start.',

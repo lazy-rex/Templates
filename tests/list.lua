@@ -75,6 +75,39 @@ test('templates.get: a reply just under 60 KiB arrives; a larger one gives too_l
   expect(size(err) < 1024).to_be(true)
 end)
 
+-- The budget counts the whole reply, rev included. A tab title of "<" (6 bytes) and "a" (1 byte)
+-- sets the encoded reply to an exact size; the next write's rev is assumed to have as many digits
+-- as the current one, and the test checks it after the write.
+test('templates.get: GET_BUDGET counts the whole reply, with rev', function()
+  local a = agent('alice')
+  local GET_BUDGET = 60 * 1024
+  local function sized(name, total)
+    for _ = 1, 3 do
+      write({{key = 'template/' .. W.hex(name), value = tpl(name, 1)}})
+      local rev = store('template/' .. W.hex(name)).rev
+      local function reply(title) return {template = {name = name, tabs = {{title = title, layout = {launch = {shell = true}, dir = '.'}}}, saved_by = 'user'}, rev = rev} end
+      local d = total - #rex.json.encode(reply(''))
+      local title = string.rep('<', math.floor(d / 6)) .. string.rep('a', d % 6)
+      write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = {{title = title, layout = {launch = {shell = true}, dir = '.'}}}}}})
+      local now = store('template/' .. W.hex(name)).rev
+      if #now == #rev then
+        rev = now
+        expect(#rex.json.encode(reply(title))).to_be(total)
+        return
+      end
+    end
+    error('the rev kept changing its length')
+  end
+  -- One byte over the budget with rev (it would fit without rev): too_large from the plugin.
+  sized('a-rev-over', GET_BUDGET + 1)
+  local err = expect_error(function() a:call('templates.get', {template = 'a-rev-over'}) end, 'too_large')
+  expect(tostring(err.message)).to_match('is too large to read')
+  -- Exactly the budget: the reply arrives at the hub (which refuses it to the Lua test client).
+  sized('a-rev-at', GET_BUDGET)
+  err = expect_error(function() a:call('templates.get', {template = 'a-rev-at'}) end, 'too_large')
+  expect(tostring(err.message)).to_match('the limit for a Lua test client')
+end)
+
 test('templates.list pages every template once, in byte order (limit and default)', function()
   local a = agent('alice')
   for i = 1, 130 do put(string.format('p-%03d', i)) end
