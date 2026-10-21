@@ -261,10 +261,11 @@ does not imply it, because a relative symlink can resolve to another suffix at a
 
 A start that breaks a condition can still get "too large to start" at admission. That refusal
 makes no run, no session and no run-counter change. `start_core` writes the `start-form` record
-before admission, so the frozen record stays: a retry with the same key gets the same refusal, and
-another request with that key gets `operation_conflict`. Records that exist already, or a template
-written by another writer, are not checked at save; admission still applies. Tests:
-`tests/save_size.lua` and the measure cases in `tests/engine.lua`.
+before admission, so the frozen record stays. It keeps the request, not the refusal: a retry with
+the same key compiles that request again, so it gets the same refusal unless the resolved
+directories changed in the meantime. Another request with that key gets `operation_conflict`.
+Records that exist already, or a template written by another writer, are not checked at save;
+admission still applies. Tests: `tests/save_size.lua` and the measure cases in `tests/engine.lua`.
 
 ## Verification
 
