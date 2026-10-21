@@ -537,14 +537,18 @@ local function find_grant(run)
   return g.grant_id
 end
 local invalidate
+-- Ticks run outside action handlers. An error stops the loop until the next wake (contract).
+-- loop.timer and loop.pump are table fields: pump and its callback write them, and pcall catches
+-- errors in the handlers that call pump (LazyRex docs/rex-protocol.md, "Rex Lua runtime"). The
+-- engine's maintenance timer calls loop.pump.
+local loop = {timer = nil, pump = nil}
+local function form_key(key) return 'start-form/' .. hex(key) end
+local function switch_key(start_key) return 'switch/' .. hex(start_key) end
 local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = resolve_root, resolve_dir = resolve_dir,
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   log = function(line) print('templates: ' .. line) end,
-  changed = function() if invalidate then pcall(invalidate) end end})
--- Ticks run outside action handlers. An error stops the loop until the next wake (contract).
--- loop.timer is a table field: pump and its callback write it, and pcall catches errors in the
--- handlers that call pump (LazyRex docs/rex-protocol.md, "Rex Lua runtime").
-local loop = {timer = nil}
+  changed = function() if invalidate then pcall(invalidate) end end,
+  form_key = form_key, switch_key = switch_key, wake = function() if loop.pump then loop.pump() end end})
 local function pump()
   if loop.timer then return end
   loop.timer = rex.after(0.05, function()
@@ -554,6 +558,7 @@ local function pump()
     if more and not err then pump() end
   end)
 end
+loop.pump = pump
 local function wake() engine.wake(); pump() end
 
 -- Start form.
@@ -573,7 +578,6 @@ end
 -- start never switches the app: it has no form.
 local SWITCH_WAIT = tonumber(rex.args.switch_wait) or 15 -- tests pass a shorter wait
 local starting = {} -- view_id -> true while its start form waits (render only)
-local function switch_key(start_key) return 'switch/' .. hex(start_key) end
 local function switch_app(view_id, start_key, run_id, at)
   local skey = switch_key(start_key)
   local saved = hub('hub.store.get', {keys = {skey}}).records[skey]
@@ -622,10 +626,13 @@ end
 -- placement?}. An agent's start also gets the grant of its exact tab requests, in the agent's
 -- call (caller.pid); the run dispatches nothing before it (templates_run.lua).
 local function start_core(caller, key, fingerprint, intent)
-  local record_key = 'start-form/' .. hex(key)
+  local record_key, marker_key = form_key(key), 'run-key/' .. key
   local request, at
-  local saved = hub('hub.store.get', {keys = {record_key}}).records[record_key]
-  if saved and type(saved.value) == 'table' then
+  local got = hub('hub.store.get', {keys = {record_key, marker_key}}).records
+  local saved = got[record_key]
+  -- A record whose retired run's marker has expired counts as absent (before the fingerprint
+  -- check): the key starts a new run, and the new record replaces it (if_rev).
+  if saved and type(saved.value) == 'table' and not run_module.form_expired(saved, got[marker_key], os.time()) then
     if saved.value.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
     -- A record from before the switch has no time: its wait is over.
     request, at = saved.value.request, type(saved.value.at) == 'number' and saved.value.at or 0
@@ -701,11 +708,15 @@ local function agent_start(caller, args)
   -- that both started with the key are a conflict, also with equal arguments (prior_op).
   local key, found = keys[1], 0
   local records = {}
-  for _, k in ipairs(keys) do records[#records + 1] = 'start-form/' .. hex(k) end
+  for _, k in ipairs(keys) do
+    records[#records + 1] = form_key(k)
+    records[#records + 1] = 'run-key/' .. k
+  end
   local got = hub('hub.store.get', {keys = records}).records
-  for i, k in ipairs(keys) do
-    local r = got[records[i]]
-    if r and r.value ~= nil then
+  for _, k in ipairs(keys) do
+    -- A record whose retired run's marker has expired does not count (start_core).
+    local r = got[form_key(k)]
+    if r and r.value ~= nil and not run_module.form_expired(r, got['run-key/' .. k], os.time()) then
       found = found + 1
       if found == 1 then key = k end
     end
@@ -1254,7 +1265,7 @@ local exports = {
       session_id = {type = 'string', minLength = 1}, panes = {type = 'object', additionalProperties = {type = 'string'}}, key = key_arg},
       required = {'name', 'root', 'key'}, additionalProperties = false}},
   {name = 'templates.start', title = 'Start a session template',
-    description = 'Start a template in a root directory: in an open session (session_id) or a new session (new_session, a name). With neither, a new session named after the template. The tabs open after this call returns; templates.runs shows the progress. You own the started panes.',
+    description = 'Start a template in a root directory: in an open session (session_id) or a new session (new_session, a name). With neither, a new session named after the template. The tabs open after this call returns; templates.runs shows the progress. You own the started panes. A finished start is removed when at least 200 newer eligible finished starts exist (eligible: finished, no revoke owed, and a user start or an agent start with a recorded grant). A replay of a removed start\'s key within 30 days of its removal gives expired; after 30 days the key starts a new start.',
     args = {type = 'object', properties = {template = {type = 'string', minLength = 1}, root = {type = 'string', minLength = 1},
       session_id = {type = 'string', minLength = 1}, new_session = {type = 'string', minLength = 1}, key = key_arg},
       required = {'template', 'root', 'key'}, additionalProperties = false}},

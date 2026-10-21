@@ -121,6 +121,35 @@ local function owes_revoke(run) return finished(run) and run.grant_id ~= nil and
 -- Each new engine (a plugin start) looks again, so a late grant is found without a loop.
 local function owes_grant_check(run) return finished(run) and by_agent(run) and run.grant_id == nil end
 
+-- Retention (decision "Templates retention keeps 200 finished starts and frees their keys after 30
+-- days", 2026-10-20; tests/templates-run.md, "Retention"). A run is eligible when it is finished,
+-- owes no revoke, and is a user run or has a recorded grant (an agent run without one is the
+-- evidence that find_grant uses). A run is retired when at least KEEP newer eligible runs exist.
+-- Newer runs get higher IDs and only older runs are retired, so the rank of a run only grows.
+-- Retirement replaces run-key/<key> with a marker {id, expired_at, form_rev} and deletes run/<id>
+-- and the switch record, in one batch with if_rev on each record. The start-form record stays: it
+-- cannot change while run-key/<key> names the live run (Templates writes it only when it is
+-- absent, or after the marker expired), so form_rev, its rev at the retirement read, still names
+-- it after the commit. This holds for the writers of Templates only, not for another writer of the
+-- store. Hub revisions never reset (hub/cmd/hub/store.go, nextRev). A marker expires MARKER_TTL
+-- seconds after expired_at: then the key is free again (checked on each use), and a cleanup
+-- deletes the marker and its start-form record if that record still has rev form_rev.
+local KEEP, MARKER_TTL, RETRY_DELAY, CLEANUP_EVERY = 200, 30 * 86400, 60, 86400
+M.KEEP, M.MARKER_TTL, M.RETRY_DELAY, M.CLEANUP_EVERY = KEEP, MARKER_TTL, RETRY_DELAY, CLEANUP_EVERY
+local function eligible(run) return finished(run) and not owes_revoke(run) and (not by_agent(run) or run.grant_id ~= nil) end
+-- older compares decimal run IDs (by length, then as text): exact beyond 2^53.
+local function older(a, b) return #a < #b or #a == #b and a < b end
+-- expired: a run-key marker whose MARKER_TTL is over at time now.
+function M.expired(marker, now)
+  return type(marker) == 'table' and type(marker.expired_at) == 'number' and now - marker.expired_at >= MARKER_TTL
+end
+-- form_expired: a start-form record that counts as absent: its run-key marker has expired and
+-- names this record (form_rev). A legacy marker without form_rev never frees a later record.
+function M.form_expired(form, marker, now)
+  return type(form) == 'table' and type(marker) == 'table' and M.expired(marker.value, now)
+    and marker.value.form_rev ~= nil and marker.value.form_rev == form.rev
+end
+
 function M.new(opts)
   local hub = assert(opts.hub, 'hub is required')
   local start_tab = assert(opts.start_tab, 'start_tab is required')
@@ -131,6 +160,12 @@ function M.new(opts)
   -- caught error, a closure's write to a captured local can be lost (LazyRex docs/rex-protocol.md,
   -- "Rex Lua runtime"): no closure writes a captured local where a pcall can catch.
   local scan = {active = false, after = nil, limit = SCAN_LIMIT}
+  local now, after = opts.now or os.time, opts.after or rex.after
+  -- kept: the eligible run IDs (a set) and their count; ready after the first full scan.
+  -- maint: maintenance steps {kind, id | key, expect, due}, the run IDs being retired, the cleanup
+  -- scan, and one timer (gen supersedes an older callback: rex.after has no cancel).
+  local kept = {ids = {}, n = 0, ready = false}
+  local maint = {items = {}, retiring = {}, cleanup = nil, cleanup_due = nil, gen = 0, timer_due = nil}
   -- note bounds an error text for the run record; the full text goes to the plugin log.
   local function note(id, text)
     text = tostring(text)
@@ -154,8 +189,48 @@ function M.new(opts)
     if result.conflict then fail('conflict', 'Template run changed; retry with the same key') end
     if not result.revs then fail('unavailable', 'Invalid store batch result') end
   end
+  -- schedule makes the pump run at time due (opts.wake), unless a timer for an earlier time waits.
+  local function schedule(due)
+    if maint.timer_due and maint.timer_due <= due then return end
+    maint.gen, maint.timer_due = maint.gen + 1, due
+    local gen = maint.gen
+    after(math.max(0, due - now()), function()
+      if maint.gen ~= gen then return end -- superseded by an earlier timer
+      maint.timer_due = nil
+      if opts.wake then opts.wake() end
+    end)
+  end
+  local function queue_step(item)
+    maint.items[#maint.items + 1] = item
+    schedule(item.due)
+  end
+  -- trim queues the oldest eligible runs over KEEP for retirement.
+  local function trim()
+    if not kept.ready or kept.n <= KEEP then return end
+    local ids = {}
+    for id in pairs(kept.ids) do ids[#ids + 1] = id end
+    table.sort(ids, older)
+    for i = 1, kept.n - KEEP do
+      local id = ids[i]
+      if not maint.retiring[id] then
+        maint.retiring[id] = true
+        queue_step({kind = 'retire', id = id, due = now()})
+      end
+    end
+  end
+  local function keep(run)
+    if eligible(run) and not kept.ids[run.id] then
+      kept.ids[run.id], kept.n = true, kept.n + 1
+      trim()
+    end
+  end
+  local function drop(id)
+    if kept.ids[id] then kept.ids[id], kept.n = nil, kept.n - 1 end
+    maint.retiring[id] = nil
+  end
   local function save(run, rev, op)
     batch({{key = 'run/' .. run.id, if_rev = rev, value = run}}, op)
+    keep(run)
     if opts.changed then pcall(opts.changed, copy(run)) end
   end
   local function compile(node, root)
@@ -201,6 +276,14 @@ function M.new(opts)
     text(request.key, 'key')
     local admission_key = 'run-key/' .. request.key
     local existing, admission_rev = read(admission_key)
+    if type(existing) == 'table' and existing.expired_at ~= nil then
+      -- A retired run's marker: the key is used until the marker expires, then it is free (the
+      -- new run replaces the marker, with if_rev).
+      if not M.expired(existing, now()) then
+        fail('expired', 'This start finished and its record was removed. Use a new key.')
+      end
+      existing = nil
+    end
     if existing then
       local run = engine.get(existing.id)
       if not same(run.request, request) then fail('operation_conflict', 'This key has different content') end
@@ -452,6 +535,119 @@ function M.new(opts)
     if run.status == 'queued' or owes_revoke(run) then enqueue(id) end
   end
 
+  -- Maintenance steps (one per tick, after the run work). A failed step waits RETRY_DELAY seconds
+  -- (a timer wakes the pump); it never blocks the run queue.
+  local function form_key(key) return opts.form_key and opts.form_key(key) end
+  -- retire reads the run and its records fresh and retires it only if it is still eligible and
+  -- run-key/<key> names it (not a marker). Else it leaves the run (a lost reply: it is gone).
+  local function retire(id)
+    local run = read('run/' .. id)
+    if type(run) ~= 'table' or not eligible(run) then drop(id) return end
+    local key = run.request.key
+    local rkey, fkey, skey = 'run-key/' .. key, form_key(key), opts.switch_key and opts.switch_key(key)
+    local keys = {'run/' .. id, rkey}
+    if fkey then keys[#keys + 1] = fkey end
+    if skey then keys[#keys + 1] = skey end
+    local got = hub('hub.store.get', {keys = keys}).records or {}
+    local r, k = got['run/' .. id], got[rkey]
+    if not r or type(r.value) ~= 'table' or not eligible(r.value) or r.value.request.key ~= key
+      or not k or type(k.value) ~= 'table' or k.value.id ~= id or k.value.expired_at ~= nil then
+      drop(id)
+      return
+    end
+    local f, s = fkey and got[fkey], skey and got[skey]
+    local marker = {id = id, expired_at = now()}
+    if f and f.value ~= nil then marker.form_rev = f.rev end
+    local ops = {{key = 'run/' .. id, if_rev = r.rev, delete = true}, {key = rkey, if_rev = k.rev, value = marker}}
+    if s and s.value ~= nil then ops[#ops + 1] = {key = skey, if_rev = s.rev, delete = true} end
+    batch(ops)
+    drop(id)
+    if opts.changed then pcall(opts.changed) end
+  end
+  -- expire deletes a marker that still is the one the cleanup scan saw (same id, expired_at and
+  -- form_rev) and has expired, and its start-form record only if that has rev form_rev.
+  local function expire(key, expect)
+    local rkey, fkey = 'run-key/' .. key, form_key(key)
+    local keys = {rkey}
+    if fkey then keys[2] = fkey end
+    local got = hub('hub.store.get', {keys = keys}).records or {}
+    local k, f = got[rkey], fkey and got[fkey]
+    local v = k and k.value
+    if type(v) ~= 'table' or v.id ~= expect.id or v.expired_at ~= expect.expired_at or v.form_rev ~= expect.form_rev
+      or not M.expired(v, now()) then return end
+    local ops = {{key = rkey, if_rev = k.rev, delete = true}}
+    if v.form_rev ~= nil and f and f.value ~= nil and f.rev == v.form_rev then ops[2] = {key = fkey, if_rev = f.rev, delete = true} end
+    batch(ops)
+  end
+  -- cleanup_page scans one page of run-key/ and queues each expired marker.
+  local function cleanup_page()
+    local c = maint.cleanup
+    local args = {prefix = 'run-key/', limit = c.limit}
+    if c.after then args.after = c.after end
+    local got, page = pcall(hub, 'hub.store.scan', args)
+    if not got then
+      local next_limit = M.smaller(c.limit, page)
+      if not next_limit then error(page, 0) end
+      c.limit = next_limit
+      return
+    end
+    if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run-key scan') end
+    for k, record in pairs(page.records) do
+      if M.expired(record.value, now()) then
+        queue_step({kind = 'expire', key = k:sub(#'run-key/' + 1), expect = copy(record.value), due = now()})
+      end
+    end
+    c.after = page.next
+    if not page.next then
+      maint.cleanup = nil
+      maint.cleanup_due = now() + CLEANUP_EVERY
+      schedule(maint.cleanup_due)
+    end
+  end
+  local function step(item)
+    if item.kind == 'retire' then retire(item.id) else expire(item.key, item.expect) end
+  end
+  -- due_step returns the index of the first step that is due, or nil.
+  local function due_step(t)
+    for i, item in ipairs(maint.items) do if item.due <= t then return i end end
+  end
+  local function maintain()
+    local t = now()
+    if not maint.cleanup and maint.cleanup_due and maint.cleanup_due <= t then
+      maint.cleanup, maint.cleanup_due = {after = nil, limit = SCAN_LIMIT}, nil
+    end
+    local i = due_step(t)
+    if i then
+      local item = table.remove(maint.items, i)
+      local ok, err = pcall(step, item)
+      if not ok then
+        item.due = t + RETRY_DELAY
+        queue_step(item)
+        if opts.log then pcall(opts.log, 'maintenance ' .. item.kind .. ' ' .. tostring(item.id or item.key) .. ': ' .. message(err)) end
+      end
+      return
+    end
+    if maint.cleanup then
+      local ok, err = pcall(cleanup_page)
+      if not ok then
+        maint.cleanup, maint.cleanup_due = nil, t + RETRY_DELAY
+        schedule(maint.cleanup_due)
+        if opts.log then pcall(opts.log, 'maintenance cleanup: ' .. message(err)) end
+      end
+      return
+    end
+    -- Nothing is due: a timer wakes the pump for the earliest later step (a timer that fired
+    -- before left no timer for it).
+    local due = maint.cleanup_due
+    for _, item in ipairs(maint.items) do if not due or item.due < due then due = item.due end end
+    if due then schedule(due) end
+  end
+  local function maintenance_due()
+    local t = now()
+    return due_step(t) ~= nil or maint.cleanup ~= nil or (maint.cleanup_due ~= nil and maint.cleanup_due <= t)
+  end
+  engine.maintenance = function() return {kept = kept.n, ready = kept.ready, steps = #maint.items, cleanup = maint.cleanup ~= nil} end
+
   -- Wake scans one store page per tick (one try: a reply_too_large retries the page with a smaller
   -- limit at the next tick). Pending and unknown runs wait for a worker event, reconnect or
   -- explicit retry. A store failure also waits: no immediate retry loop.
@@ -464,6 +660,7 @@ function M.new(opts)
       if scan.active then
         local args = {prefix='run/', limit=scan.limit}
         if scan.after then args.after = scan.after end
+        scan.paged = true
         local got, page = pcall(hub, 'hub.store.scan', args)
         if not got then
           local next_limit = M.smaller(scan.limit, page)
@@ -475,15 +672,28 @@ function M.new(opts)
         for _, record in pairs(page.records) do
           local run = record.value
           if run and (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
+          if type(run) == 'table' and type(run.id) == 'string' and eligible(run) and not kept.ids[run.id] then
+            kept.ids[run.id], kept.n = true, kept.n + 1
+          end
         end
         scan.after, scan.active = page.next, page.next ~= nil
+        if not page.next and not kept.ready then
+          -- The first full scan: the index is complete. The first cleanup starts now.
+          kept.ready, maint.cleanup_due = true, now()
+          trim()
+        elseif not page.next then
+          trim()
+        end
         return
       end
       local id = table.remove(queue, 1)
       if id then queued[id] = nil; advance(id) end
     end)
     if not ok then scan.active, scan.after = false, nil end
-    return scan.active or #queue > 0, not ok and err or nil
+    -- One maintenance step per tick, after the run work; its errors stay in maintain. A tick that
+    -- read a scan page does none: one store scan per tick at most.
+    if scan.paged then scan.paged = false else pcall(maintain) end
+    return scan.active or #queue > 0 or maintenance_due(), not ok and err or nil
   end
   return engine
 end

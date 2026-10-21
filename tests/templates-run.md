@@ -127,6 +127,49 @@ Revoke. When an agent's run is finished (open, failed, closed or dismissed) and 
 engine revokes the grant after the final state commits, and records `grant_revoked`. A failed
 revoke stays owed until a later wake.
 
+## Retention
+
+Decision "Templates retention keeps 200 finished starts and frees their keys after 30 days"
+(2026-10-20). Code: `templates_run.lua`, "Retention". Tests: `engine.lua` (the retention cases, with
+a controlled clock and timers) and `retention.lua` (through the plugin).
+
+- **Eligible.** A run is eligible when it is finished, owes no revoke, and is a user run or an agent
+  run with a recorded grant. Unfinished runs, runs that owe a revoke, and agent runs without a
+  recorded grant are kept and not counted.
+- **Retired.** A run is retired when at least 200 newer eligible runs exist. The engine keeps the
+  eligible run IDs in memory. The first full scan after a plugin start builds the list. After that,
+  a run joins when its final state commits with nothing owed, or when its revoke succeeds. So the
+  201st eligible run retires the oldest one without a separate wake.
+- **Batch.** The engine reads `run/<id>`, `run-key/<key>`, `start-form/<hex key>` and
+  `switch/<hex key>` fresh. It retires the run only if the run is still eligible and `run-key/<key>`
+  names it. Then one batch, with `if_rev` on each record: delete `run/<id>`; write the marker
+  `run-key/<key>` = `{id, expired_at, form_rev}`; delete the switch record if it exists. The batch
+  is under 4 KiB with the largest keys (an engine case measures it). The `start-form` record is
+  not changed. `form_rev` is its rev at the fresh read. Templates writes that record only when it
+  is absent, or after its marker expired, so it cannot change while `run-key/<key>` names the live
+  run. This holds for the writers of Templates, not for another writer of the store. Hub revisions
+  never reset (`hub/cmd/hub/store.go`, `nextRev`).
+- **Replay.** An agent replay of a retired key within 30 days: `expired` (same arguments) or
+  `operation_conflict` (other arguments). A legacy run without a `start-form` record has a marker
+  without `form_rev`: a replay writes a new record and gets `expired`.
+- **Expiry.** A marker expires 30 days after `expired_at` (`now - expired_at >= 30 * 86400`). The
+  check is on each use, before the fingerprint check: in the agent's alias lookup, in `start_core`
+  and in `engine.admit`. A `start-form` record counts as absent only when its marker has expired
+  and `form_rev` equals its rev. Then the new start replaces both records (`if_rev`). A legacy
+  marker never frees a later record: after 30 days that record decides the fingerprint.
+- **Cleanup.** After the first full scan and then every 24 hours, the engine scans `run-key/` and
+  queues each expired marker. Each step reads both records fresh and deletes the marker only if it
+  is the one the scan saw (`id`, `expired_at`, `form_rev`) and has expired. It deletes the
+  `start-form` record only if that record has rev `form_rev`. A reused key keeps its new records.
+- **Maintenance.** A tick does its run work first, then at most one maintenance step (a
+  retirement, a cleanup scan page or a cleanup batch). A tick that read a run-scan page does none:
+  one store scan per tick. A failed step waits 60 s. One timer wakes the pump for the earliest
+  step. A newer timer for an earlier time supersedes an older callback (a generation number:
+  `rex.after` has no cancel).
+- **UI boundary.** The hub saves a completed view operation and answers a resubmit without a
+  call to Templates. A new Start form with the same key is refused by the hub
+  (`operation_conflict`). A read hook proves that Templates does not read the record.
+
 ## Size bounds
 
 One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The

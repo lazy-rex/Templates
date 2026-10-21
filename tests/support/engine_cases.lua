@@ -29,9 +29,11 @@ local function fixture()
         if (f.records[op.key] or {rev='0'}).rev ~= op.if_rev then return {conflict=true} end
       end
       local revs = {}
+      f.batches = (f.batches or 0) + 1
       for _, op in ipairs(args.ops) do
         f.rev = f.rev + 1
-        f.records[op.key] = {rev=tostring(f.rev), value=copy(op.value)}
+        -- A deleted record is absent, as in the hub (a get gives rev '0').
+        if op.delete then f.records[op.key] = nil else f.records[op.key] = {rev=tostring(f.rev), value=copy(op.value)} end
         revs[op.key] = tostring(f.rev)
       end
       if f.lose_store then f.lose_store = nil; error('lost committed store reply') end
@@ -39,7 +41,7 @@ local function fixture()
     elseif action == 'hub.store.scan' then
       -- Pages as the hub does: keys in order after args.after, at most args.limit, next = the
       -- last key of a page that has more. f.scan_fail(args) can fail a call with an error.
-      f.scans[#f.scans + 1] = {limit=args.limit, after=args.after}
+      f.scans[#f.scans + 1] = {limit=args.limit, after=args.after, prefix=args.prefix}
       if f.scan_fail then local err = f.scan_fail(args); if err then error(err, 0) end end
       local keys = {}
       for k in pairs(f.records) do
@@ -69,9 +71,17 @@ local function fixture()
     if f.lose_progress then f.lose_progress = nil; f.lose_store = true end
     return copy(result)
   end
-  f.revoked, f.lookups = {}, 0
-  function f.engine()
-    return Run.new({hub=f.hub, start_tab=f.start, find_grant=function(run)
+  -- A fake clock (f.now, seconds) and fake timers: f.timers gets {due, fn}; f.fire(t) runs the
+  -- timers due at time t.
+  f.revoked, f.lookups, f.now, f.timers, f.wakes = {}, 0, 1000000000, {}, 0
+  function f.fire(t)
+    f.now = t
+    local due = {}
+    for i = #f.timers, 1, -1 do if f.timers[i].due <= t then due[#due + 1] = table.remove(f.timers, i) end end
+    for i = #due, 1, -1 do due[i].fn() end
+  end
+  function f.engine(extra)
+    local o = {hub=f.hub, start_tab=f.start, find_grant=function(run)
       f.lookups = f.lookups + 1
       return f.grant
     end, revoke=function(grant_id)
@@ -82,7 +92,11 @@ local function fixture()
     end, resolve_dir=function(root, dir)
       if f.escape then return '/outside' end
       return dir == '.' and root or root .. '/' .. dir
-    end})
+    end,
+    now=function() return f.now end, after=function(delay, fn) f.timers[#f.timers + 1] = {due=f.now + delay, fn=fn} end,
+    wake=function() f.wakes = f.wakes + 1 end}
+    for k, v in pairs(extra or {}) do o[k] = v end
+    return Run.new(o)
   end
   return f
 end
@@ -393,7 +407,8 @@ end
 local too_large = {code='reply_too_large', message='reply too large'}
 local function limits(f)
   local out = {}
-  for i, s in ipairs(f.scans) do out[i] = s.limit end
+  -- The run scans only (the retention cleanup scans run-key/).
+  for _, s in ipairs(f.scans) do if s.prefix == 'run/' then out[#out + 1] = s.limit end end
   return out
 end
 function tests.a_scan_halves_its_limit_on_reply_too_large_and_keeps_its_cursor()
@@ -585,6 +600,248 @@ function tests.admission_refuses_an_invalid_session_id()
     expect_error(function() e.admit(r) end, 'invalid_input')
   end
   assert(f.records['run-counter'] == nil)
+end
+
+-- Retention (templates_run.lua, "Retention"; tests/templates-run.md). The fixture's records hold
+-- the runs, their run-key records and their start-form records (form_key: 'start-form/' .. key in
+-- these tests); f.now is the clock and f.timers the timers.
+local RKEYS = {form_key=function(k) return 'start-form/' .. k end, switch_key=function(k) return 'switch/' .. k end}
+local function put(f, key, value)
+  f.rev = f.rev + 1
+  f.records[key] = {rev=tostring(f.rev), value=value}
+  return tostring(f.rev)
+end
+-- seed writes run id (a number) with this status and its records; extra fields go into the run.
+local function seed(f, id, status, extra, by)
+  id = tostring(id)
+  local key = 'k' .. id
+  local run = {id=id, status=status, root='/root', tabs={}, next_tab=1, results={}, session_key='templates/' .. id .. '/session',
+    request={key=key, root='/root', new_session_name='S', template={v=1, name='T', tabs={}}, by=by}}
+  for k, v in pairs(extra or {}) do run[k] = v end
+  put(f, 'run/' .. id, run)
+  put(f, 'run-key/' .. key, {id=id})
+  put(f, 'start-form/' .. key, {fingerprint='fp' .. id, request=run.request, at=1})
+  return run
+end
+local function seed_open(f, first, last) for i = first, last do seed(f, i, 'open') end end
+local function rdrain(e)
+  for i = 1, 3000 do local more, err = e.tick(); assert(not err, tostring(err)); if not more then return end end
+  error('Engine did not settle')
+end
+local function present(f, first, last)
+  local n = 0
+  for i = first, last do if f.records['run/' .. i] then n = n + 1 end end
+  return n
+end
+-- ready ticks until the first full scan is done (the retirements are queued, none ran yet).
+local function ready(e)
+  for i = 1, 100 do if e.maintenance().ready then return end; e.tick() end
+  error('The scan did not finish')
+end
+
+function tests.retention_keeps_the_200_newest_eligible_runs_and_every_unfinished_run()
+  local f = fixture()
+  seed_open(f, 1, 205)
+  -- Unfinished: agent runs that wait for their grant (no grant: they dispatch nothing).
+  for i = 206, 208 do seed(f, i, 'authorizing', nil, 'alice') end
+  local form1 = f.records['start-form/k1']
+  local e = f.engine(RKEYS); e.resume(); rdrain(e)
+  assert(present(f, 1, 5) == 0, 'the 5 oldest are retired')
+  assert(present(f, 6, 205) == 200, 'the 200 newest eligible runs stay')
+  assert(present(f, 206, 208) == 3, 'every unfinished run stays')
+  for i = 1, 5 do
+    local m = f.records['run-key/k' .. i].value
+    assert(m.id == tostring(i) and m.expired_at == f.now and m.form_rev == f.records['start-form/k' .. i].rev, 'marker ' .. i)
+  end
+  -- The start-form record is not changed by a retirement.
+  assert(equal(f.records['start-form/k1'], form1), 'start-form unchanged')
+  -- A new engine (a plugin restart) over the same store retires nothing more.
+  local batches = f.batches
+  local e2 = f.engine(RKEYS); e2.resume(); rdrain(e2)
+  assert(present(f, 6, 205) == 200 and f.batches == batches, 'nothing more after a restart')
+end
+
+function tests.retention_the_201st_eligible_run_retires_the_oldest_without_a_wake()
+  local f = fixture()
+  seed_open(f, 1, 200)
+  put(f, 'run-counter', '300')
+  local e = f.engine(RKEYS); e.resume(); rdrain(e)
+  assert(present(f, 1, 200) == 200, 'nothing retired at 200')
+  -- A new start opens after the scan; no wake.
+  local run = e.admit(request('new-start'))
+  rdrain(e)
+  assert(e.get(run.id).status == 'open')
+  assert(f.records['run/1'] == nil, 'the oldest is retired')
+  assert(present(f, 2, 200) == 199 and f.records['run/' .. run.id] ~= nil)
+end
+
+function tests.retention_a_run_that_owes_a_revoke_is_retired_only_after_its_revoke()
+  local f = fixture()
+  seed(f, 1, 'open', {grant_id='grant:1'}, 'alice')
+  seed_open(f, 2, 201)
+  f.revoke_fails = true
+  local e = f.engine(RKEYS); e.resume(); rdrain(e)
+  assert(f.records['run/1'] ~= nil and present(f, 2, 201) == 200, 'kept while it owes the revoke')
+  -- The revoke passes at the next wake; the run is then eligible and the oldest.
+  e.wake(); rdrain(e)
+  assert(f.records['run/1'] == nil and f.revoked[1] == 'grant:1', 'retired after its revoke')
+  assert(present(f, 2, 201) == 200)
+end
+
+function tests.retention_never_retires_an_agent_run_without_a_recorded_grant()
+  local f = fixture()
+  seed(f, 1, 'dismissed', {dismissed_from='authorizing'}, 'alice')
+  seed_open(f, 2, 202)
+  local e = f.engine(RKEYS); e.resume(); rdrain(e)
+  assert(f.records['run/1'] ~= nil, 'protected')
+  assert(f.records['run/2'] == nil and present(f, 3, 202) == 200, 'the oldest eligible run is retired')
+end
+
+function tests.retention_a_lost_reply_is_not_retired_twice()
+  local f = fixture()
+  seed_open(f, 1, 201)
+  local e = f.engine(RKEYS); e.resume(); ready(e)
+  f.lose_store = true
+  local batches = f.batches or 0
+  e.tick()
+  assert(f.records['run/1'] == nil and f.records['run-key/k1'].value.expired_at, 'committed')
+  assert(f.batches == batches + 1)
+  -- The step waits RETRY_DELAY; then it finds the run gone and writes nothing.
+  local marker = f.records['run-key/k1']
+  rdrain(e)
+  f.fire(f.now + Run.RETRY_DELAY); rdrain(e)
+  assert(f.batches == batches + 1 and equal(f.records['run-key/k1'], marker), 'no second batch')
+end
+
+function tests.retention_a_failed_batch_waits_and_is_not_retried_at_once()
+  local f = fixture()
+  seed_open(f, 1, 201)
+  local e = f.engine(RKEYS); e.resume(); ready(e)
+  f.fire(f.now) -- the timer of the queued retirement (due now)
+  f.fail_before = true
+  e.tick()
+  assert(f.records['run/1'] ~= nil, 'not retired')
+  local batches = f.batches or 0
+  for i = 1, 20 do e.tick() end
+  assert((f.batches or 0) == batches, 'no retry before the delay')
+  assert(#f.timers >= 1, 'a timer waits')
+  local wakes = f.wakes
+  f.fire(f.now + Run.RETRY_DELAY)
+  assert(f.wakes == wakes + 1, 'the timer wakes the pump')
+  rdrain(e)
+  assert(f.records['run/1'] == nil and (f.batches or 0) == batches + 1, 'retired once')
+end
+
+function tests.retention_rechecks_the_run_key_before_it_retires()
+  local f = fixture()
+  seed_open(f, 1, 201)
+  local e = f.engine(RKEYS); e.resume(); ready(e)
+  -- The key names another run (changed after the queue): not retired.
+  put(f, 'run-key/k1', {id='999'})
+  local batches = f.batches or 0
+  rdrain(e)
+  assert(f.records['run/1'] ~= nil and (f.batches or 0) == batches, 'not retired')
+end
+
+function tests.retention_an_earlier_timer_supersedes_a_later_one()
+  local f = fixture()
+  seed_open(f, 1, 201)
+  put(f, 'run-counter', '300')
+  local e = f.engine(RKEYS); e.resume(); ready(e)
+  f.fire(f.now) -- the timer of the queued retirement (due now)
+  f.fail_before = true
+  e.tick()
+  local late
+  for _, t in ipairs(f.timers) do if t.due == f.now + Run.RETRY_DELAY then late = t end end
+  assert(late, 'a timer for the retry')
+  -- A new eligible run queues a retirement that is due now: an earlier timer replaces the late one.
+  e.admit(request('newer')); rdrain(e)
+  local wakes = f.wakes
+  late.fn()
+  assert(f.wakes == wakes, 'the superseded callback does nothing')
+end
+
+function tests.retention_a_marker_frees_its_key_after_30_days_exactly()
+  local f = fixture()
+  put(f, 'run-key/kx', {id='5', expired_at=f.now - Run.MARKER_TTL + 1, form_rev='1'})
+  local e = f.engine(RKEYS)
+  expect_error(function() e.admit(request('kx')) end, 'expired')
+  f.now = f.now + 1
+  local run = e.admit(request('kx'))
+  assert(f.records['run-key/kx'].value.id == run.id and f.records['run-key/kx'].value.expired_at == nil, 'a new run')
+end
+
+function tests.retention_cleanup_deletes_expired_markers_and_only_their_own_forms()
+  local f = fixture()
+  local old = f.now - Run.MARKER_TTL - 1
+  -- a: expired, its form; b: expired, the form was replaced (another rev); c: not expired;
+  -- d: legacy (no form_rev) with a form written later.
+  local ra = put(f, 'start-form/a', {fingerprint='fa'})
+  put(f, 'run-key/a', {id='1', expired_at=old, form_rev=ra})
+  local rb = put(f, 'start-form/b', {fingerprint='fb'})
+  put(f, 'start-form/b', {fingerprint='fb2'})
+  put(f, 'run-key/b', {id='2', expired_at=old, form_rev=rb})
+  put(f, 'run-key/c', {id='3', expired_at=f.now - Run.MARKER_TTL + 100, form_rev='1'})
+  put(f, 'start-form/d', {fingerprint='fd'})
+  put(f, 'run-key/d', {id='4', expired_at=old})
+  local e = f.engine(RKEYS); e.resume(); rdrain(e)
+  assert(f.records['run-key/a'] == nil and f.records['start-form/a'] == nil, 'a')
+  assert(f.records['run-key/b'] == nil and f.records['start-form/b'].value.fingerprint == 'fb2', 'b keeps its new form')
+  assert(f.records['run-key/c'] ~= nil, 'c is not expired')
+  assert(f.records['run-key/d'] == nil and f.records['start-form/d'] ~= nil, 'd keeps the later form')
+  -- The next cleanup runs 24 hours later.
+  put(f, 'run-key/e', {id='6', expired_at=old})
+  rdrain(e)
+  assert(f.records['run-key/e'] ~= nil, 'not before 24 hours')
+  f.fire(f.now + Run.CLEANUP_EVERY); rdrain(e)
+  assert(f.records['run-key/e'] == nil, 'the daily cleanup')
+end
+
+function tests.retention_cleanup_leaves_a_key_reused_after_its_scan()
+  local f = fixture()
+  local old = f.now - Run.MARKER_TTL - 1
+  local ra = put(f, 'start-form/a', {fingerprint='fa'})
+  put(f, 'run-key/a', {id='1', expired_at=old, form_rev=ra})
+  local e = f.engine(RKEYS); e.resume()
+  -- Tick until the cleanup scan queued the marker, then reuse the key before the step.
+  for i = 1, 50 do
+    e.tick()
+    if e.maintenance().steps > 0 then break end
+  end
+  assert(e.maintenance().steps == 1, 'queued')
+  put(f, 'start-form/a', {fingerprint='new'})
+  put(f, 'run-key/a', {id='7'})
+  rdrain(e)
+  assert(f.records['run-key/a'].value.id == '7' and f.records['start-form/a'].value.fingerprint == 'new', 'the reuse stays')
+end
+
+function tests.retention_the_retirement_batch_is_small_with_the_largest_keys()
+  local f = fixture32()
+  local batches = {}
+  local hub = f.hub
+  f.hub = function(action, args)
+    if action == 'hub.store.batch' then batches[#batches + 1] = copy(args) end
+    return hub(action, args)
+  end
+  local key = worst_op_key('start')
+  local hexkey = (key:gsub('.', function(c) return string.format('%02x', c:byte()) end))
+  local keys = {form_key=function(k) return 'start-form/' .. (k:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end,
+    switch_key=function(k) return 'switch/' .. (k:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end}
+  local run = seed(f, RUN_ID, 'open')
+  run.request.key = key
+  f.records['run/' .. RUN_ID].value.request.key = key
+  f.records['run-key/k' .. RUN_ID] = nil
+  put(f, 'run-key/' .. key, {id=RUN_ID})
+  put(f, 'start-form/' .. hexkey, {fingerprint=string.rep('<', 40000)})
+  put(f, 'switch/' .. hexkey, {state='done'})
+  -- 200 newer eligible runs: IDs of 33 digits are newer than RUN_ID (32 digits).
+  for i = 1, 200 do seed(f, '2' .. string.format('%032d', i), 'open') end
+  local logs = {}
+  local e = f.engine({form_key=keys.form_key, switch_key=keys.switch_key, log=function(l) logs[#logs + 1] = l end}); e.resume(); rdrain(e)
+  assert(f.records['run/' .. RUN_ID] == nil, 'retired: ' .. table.concat(logs, ' | ') .. ' ' .. rex.json.encode(e.maintenance()) .. ' batches ' .. #batches .. ' rk ' .. tostring(f.records['run-key/' .. key] ~= nil))
+  local retire = batches[#batches]
+  assert(#retire.ops == 3, 'run, marker and switch')
+  fits('the retirement write', frame(retire), 4096)
 end
 return tests
 end

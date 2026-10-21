@@ -21,6 +21,14 @@ views and agent outputs have a size limit:
   such a record.
 - The Save as Template form has no size limit yet.
 
+## Retention
+
+Templates keeps every unfinished start and the newest 200 eligible finished starts. An older
+finished start is removed. Eligible: finished, no grant revoke owed, and a user start or an agent
+start with a recorded grant. A replay of a removed start's key within 30 days of the removal gives
+`expired`; after 30 days the key starts a new start. A resubmit of a completed Start form returns
+its saved result from the hub. Details: `tests/templates-run.md`, "Retention".
+
 ## Install
 
 Check this repository out next to LazyRex, and add the plugin to the hub config:
