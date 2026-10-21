@@ -164,8 +164,9 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
 - **Maintenance.** A tick does its run work first, then at most one maintenance step (a
   retirement, a cleanup scan page or a cleanup batch). A tick that read a run-scan page does none:
   one store scan per tick. A failed step waits 60 s. One timer wakes the pump for the earliest
-  step. A newer timer for an earlier time supersedes an older callback (a generation number:
-  `rex.after` has no cancel).
+  step that is not due yet. Each tick sets it again, also a tick that read a scan page: a timer
+  for an earlier step can supersede it. A newer timer for an earlier time supersedes an older
+  callback (a generation number: `rex.after` has no cancel).
 - **UI boundary.** The hub saves a completed view operation and answers a resubmit without a
   call to Templates. A new Start form with the same key is refused by the hub
   (`operation_conflict`). A read hook proves that Templates does not read the record.

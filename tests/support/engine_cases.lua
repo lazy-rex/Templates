@@ -843,5 +843,30 @@ function tests.retention_the_retirement_batch_is_small_with_the_largest_keys()
   assert(#retire.ops == 3, 'run, marker and switch')
   fits('the retirement write', frame(retire), 4096)
 end
+
+-- A step due now supersedes the timer of a later step (one timer: the earliest). Its timer fires
+-- after the step ran; the ticks that follow read scan pages (a wake), which run no maintenance.
+-- The later step must still get a timer.
+function tests.retention_a_later_step_keeps_its_timer_after_an_earlier_step()
+  local f = fixture()
+  seed_open(f, 1, 201)
+  put(f, 'run-counter', '300')
+  local e = f.engine(RKEYS); e.resume(); ready(e)
+  f.fire(f.now) -- the timer of the queued retirement (due now)
+  f.fail_before = true
+  e.tick() -- the retirement of run 1 fails: it waits RETRY_DELAY
+  assert(f.records['run/1'] ~= nil)
+  -- A new start retires run 2 now: its step is due now.
+  local run = e.admit(request('new-start')); rdrain(e)
+  assert(e.get(run.id).status == 'open' and f.records['run/2'] == nil, 'run 2 retired')
+  e.wake() -- a worker change: the next ticks read scan pages
+  f.fire(f.now); rdrain(e)
+  -- RETRY_DELAY later, a timer wakes the pump for run 1.
+  local wakes = f.wakes
+  f.fire(f.now + Run.RETRY_DELAY)
+  assert(f.wakes > wakes, 'a timer wakes the pump for the later step')
+  rdrain(e)
+  assert(f.records['run/1'] == nil, 'run 1 retired')
+end
 return tests
 end

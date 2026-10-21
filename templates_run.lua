@@ -636,10 +636,13 @@ function M.new(opts)
       end
       return
     end
-    -- Nothing is due: a timer wakes the pump for the earliest later step (a timer that fired
-    -- before left no timer for it).
-    local due = maint.cleanup_due
-    for _, item in ipairs(maint.items) do if not due or item.due < due then due = item.due end end
+  end
+  -- arm makes a timer wake the pump for the earliest step that is not due at time t. Each tick
+  -- calls it, also a tick that read a scan page (no maintenance step): a timer that fired for an
+  -- earlier step superseded the later step's timer.
+  local function arm(t)
+    local due = maint.cleanup_due and maint.cleanup_due > t and maint.cleanup_due or nil
+    for _, item in ipairs(maint.items) do if item.due > t and (not due or item.due < due) then due = item.due end end
     if due then schedule(due) end
   end
   local function maintenance_due()
@@ -693,6 +696,7 @@ function M.new(opts)
     -- One maintenance step per tick, after the run work; its errors stay in maintain. A tick that
     -- read a scan page does none: one store scan per tick at most.
     if scan.paged then scan.paged = false else pcall(maintain) end
+    pcall(arm, now())
     return scan.active or #queue > 0 or maintenance_due(), not ok and err or nil
   end
   return engine
