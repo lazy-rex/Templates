@@ -285,27 +285,9 @@ function M.new(opts)
     return {direction=node.direction, ratio=node.ratio, before=compile(node.before, root), after=compile(node.after, root)}
   end
 
-  -- Repeated admission uses the original request before checking today's directories or template.
-  -- The frozen requests survive a changed profile, template, cwd, or plugin process.
-  function engine.admit(request)
-    fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
-    text(request.key, 'key')
-    local admission_key = 'run-key/' .. request.key
-    local existing, admission_rev = read(admission_key)
-    if type(existing) == 'table' and existing.expired_at ~= nil then
-      -- A retired run's marker: the key is used until the marker expires, then it is free (the
-      -- new run replaces the marker, with if_rev).
-      if not M.expired(existing, now()) then
-        fail('expired', 'This start finished and its record was removed. Use a new key.')
-      end
-      existing = nil
-    end
-    if existing then
-      local run = engine.get(existing.id)
-      if not same(run.request, request) then fail('operation_conflict', 'This key has different content') end
-      if not finished(run) then enqueue(run.id) end
-      return run
-    end
+  -- prepare validates a new run's request and compiles its tabs (admit and measure). It returns the
+  -- resolved root and the compiled tabs.
+  local function prepare(request)
     if (request.session_id ~= nil) == (request.new_session_name ~= nil) then fail('invalid_input', 'Choose one existing or new session') end
     if request.by ~= nil then text(request.by, 'by') end
     if request.session_id ~= nil and not valid_id(request.session_id) then fail('invalid_input', 'Invalid session ID') end
@@ -333,24 +315,22 @@ function M.new(opts)
       text(tab.title, 'tab title')
       tabs[i] = {title=tab.title, layout=compile(tab.layout, root)}
     end
-    local counter, counter_rev = read('run-counter')
-    -- Decimal addition keeps operation IDs exact beyond Lua's integer precision.
-    local digits, carry = tostring(counter or '0'), 1
-    local id = ''
-    for i = #digits, 1, -1 do
-      local n = tonumber(digits:sub(i, i)) + carry
-      id, carry = tostring(n % 10) .. id, math.floor(n / 10)
-    end
-    if carry == 1 then id = '1' .. id end
-    if #id > MAX_RUN_ID then fail('unavailable', 'The run counter is full') end
+    return root, tabs
+  end
+  -- build returns the new run record of request with run ID id (the record that admit writes).
+  local function build(request, root, tabs, id)
     local run = {id=id, request=copy(request), root=root, tabs=tabs, next_tab=1,
       status='queued', results={}, session_key='templates/' .. id .. '/session'}
     -- An agent's run waits for its grant (engine.authorize) before it dispatches anything.
     if by_agent(run) then run.status = 'authorizing' end
     if request.session_id then run.session_id = request.session_id end
     for i, tab in ipairs(tabs) do tab.key = 'templates/' .. id .. '/tab/' .. tostring(i) end
-    -- Refuse a run that cannot be written at its final size: it would stop at its first update
-    -- with a session made and no tab (observed in the lab, tests/limits.lua).
+    return run
+  end
+  -- final_size returns the encoded size of run at its final size: every tab request and result,
+  -- the IDs at MAX_ID and the errors at MAX_TEXT ("Admission" above).
+  local function final_size(run)
+    local request, tabs = run.request, run.tabs
     local final, id_max, text_max = copy(run), string.rep('x', MAX_ID), string.rep('"', MAX_TEXT)
     final.session_id, final.status, final.error = request.session_id or id_max, 'dismissed', text_max
     final.dismissed_from, final.grant_id, final.grant_revoked, final.next_tab = 'authorizing', id_max, true, #tabs + 1
@@ -361,7 +341,46 @@ function M.new(opts)
       for b = 1, count_leaves(tab.layout) do blocks[b] = id_max end
       final.results[i] = {status = 'unknown', window_id = id_max, block_ids = blocks, error = text_max}
     end
-    local size = json_size(final)
+    return json_size(final)
+  end
+
+  -- Repeated admission uses the original request before checking today's directories or template.
+  -- The frozen requests survive a changed profile, template, cwd, or plugin process.
+  function engine.admit(request)
+    fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
+    text(request.key, 'key')
+    local admission_key = 'run-key/' .. request.key
+    local existing, admission_rev = read(admission_key)
+    if type(existing) == 'table' and existing.expired_at ~= nil then
+      -- A retired run's marker: the key is used until the marker expires, then it is free (the
+      -- new run replaces the marker, with if_rev).
+      if not M.expired(existing, now()) then
+        fail('expired', 'This start finished and its record was removed. Use a new key.')
+      end
+      existing = nil
+    end
+    if existing then
+      local run = engine.get(existing.id)
+      if not same(run.request, request) then fail('operation_conflict', 'This key has different content') end
+      if not finished(run) then enqueue(run.id) end
+      return run
+    end
+    local root, tabs = prepare(request)
+    local counter, counter_rev = read('run-counter')
+    -- Decimal addition keeps operation IDs exact beyond Lua's integer precision.
+    local digits, carry = tostring(counter or '0'), 1
+    local id = ''
+    for i = #digits, 1, -1 do
+      local n = tonumber(digits:sub(i, i)) + carry
+      id, carry = tostring(n % 10) .. id, math.floor(n / 10)
+    end
+    if carry == 1 then id = '1' .. id end
+    if #id > MAX_RUN_ID then fail('unavailable', 'The run counter is full') end
+    local run = build(request, root, tabs, id)
+    -- Refuse a run that cannot be written at its final size: it would stop at its first update
+    -- with a session made and no tab (observed in the lab, tests/limits.lua). The size is of the
+    -- compiled tabs that the batch writes, with the actual run ID.
+    local size = final_size(run)
     if size > MAX_RUN then
       fail('invalid_input', string.format('The template is too large to start: its start record needs about %d KiB, and the limit is %d KiB',
         math.ceil(size / 1024), math.floor(MAX_RUN / 1024)))
@@ -371,6 +390,16 @@ function M.new(opts)
     enqueue(id)
     if opts.changed then pcall(opts.changed, copy(run)) end
     return copy(run)
+  end
+
+  -- measure returns the final-record size (final_size) of a new run of request with a run ID of
+  -- MAX_RUN_ID digits, after admit's validation and compile. It reads no store record and writes
+  -- nothing. The save check uses it (templates.lua, save_core).
+  function engine.measure(request)
+    fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
+    text(request.key, 'key')
+    local root, tabs = prepare(request)
+    return final_size(build(request, root, tabs, string.rep('9', MAX_RUN_ID)))
   end
 
   function engine.get(id)

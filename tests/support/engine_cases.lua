@@ -917,5 +917,64 @@ function tests.retention_a_later_step_keeps_its_timer_after_an_earlier_step()
   rdrain(e)
   assert(f.records['run/1'] == nil, 'run 1 retired')
 end
+
+-- engine.measure (the save check, templates.lua start_size): the final-record size with a run ID of
+-- 32 digits. admit measures with the actual run ID.
+function tests.measure_agrees_with_admit_at_the_largest_run_id()
+  local run = largest('a')
+  local n = #run.request.template.tabs[1].layout.launch.args.port
+  local e = fixture().engine()
+  assert(e.measure(sized('a', n)) <= MAX_RUN, 'the largest admitted run fits')
+  assert(e.measure(sized('a', n + 1)) > MAX_RUN, 'one more byte does not fit')
+end
+
+function tests.admit_keeps_its_actual_run_id_size()
+  local n = #largest('a').request.template.tabs[1].layout.launch.args.port
+  local f = fixture()
+  assert(f.engine().measure(sized('a', n + 1)) > MAX_RUN, 'over the limit with 32 digits')
+  -- Run ID "1": the same request fits, and admission accepts it as before.
+  local run = f.engine().admit(sized('a', n + 1))
+  assert(run.id == '1')
+end
+
+function tests.measure_reads_and_writes_nothing()
+  local f = fixture()
+  local e = f.engine()
+  local before = copy(f.records)
+  local batches = f.batches
+  local get = f.hub
+  f.hub = function(action, args)
+    assert(action ~= 'hub.store.get' and action ~= 'hub.store.batch' and action ~= 'hub.store.scan', 'measure called ' .. action)
+    return get(action, args)
+  end
+  e = f.engine()
+  assert(e.measure(request('m-1')) > 0)
+  f.hub = get
+  assert(equal(f.records, before) and f.batches == batches, 'nothing written')
+  local more = e.tick()
+  assert(not more, 'nothing queued')
+end
+
+-- The guarantee's conditions (tests/templates-run.md, "Save size"): each variable string adds its
+-- encoded size. An omitted optional field is not larger than its reference.
+function tests.measure_grows_only_with_the_encoded_size_of_each_variable_string()
+  local e = fixture().engine()
+  local function m(edit) local r = request('m-key'); edit(r); return e.measure(r) end
+  local id = string.rep('x', Run.MAX_ID)
+  local ref_window = m(function(r) r.placement = {focus={source_window_id=id}} end)
+  assert(m(function(r) end) <= ref_window, 'no placement')
+  assert(m(function(r) r.placement = {focus={source_window_id='window:01a15fa8-f805-73d4-b14f-ec1c999a5bf4'}} end) <= ref_window)
+  assert(m(function(r) r.placement = {focus={source_window_id=string.rep('<', Run.MAX_ID)}} end) > ref_window, 'a longer encoded window ID')
+  -- Equal encoded size, equal size: the root and the name.
+  assert(m(function(r) r.root = '/abcde' end) == m(function(r) r.root = '/vwxyz' end))
+  assert(m(function(r) r.root = '/<' end) > m(function(r) r.root = '/abcde' end), 'a longer encoded root')
+  assert(m(function(r) r.new_session_name = 'xxxxxx' end) == m(function(r) r.new_session_name = '<' end))
+  -- An existing-session start is not larger than its reference session ID of MAX_ID.
+  local existing = m(function(r) r.new_session_name = nil; r.session_id = id end)
+  assert(m(function(r) r.new_session_name = nil; r.session_id = 'session:1' end) <= existing)
+  -- An agent start: no by is not larger than the reference by.
+  local agent = m(function(r) r.by = string.rep('<', Run.MAX_ID) end)
+  assert(m(function(r) r.by = 'alice' end) <= agent and m(function(r) end) <= agent)
+end
 return tests
 end

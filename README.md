@@ -19,7 +19,10 @@ views and agent outputs have a size limit:
   key that is not hex, a name that is not valid UTF-8, or a name over 8 KiB as JSON, stops the
   list: the page before it ends, and the next page gives `too_large`. Templates does not delete
   such a record.
-- The Save as Template form has no size limit yet.
+- Save refuses a template that is too large to start at its root (`invalid_input`). A start
+  at another root, with a longer encoded root, session name or folder, can still be refused at
+  start. Details: `tests/templates-run.md`, "Save size".
+- The Save as Template form view has no size limit yet.
 
 ## Retention
 

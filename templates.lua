@@ -393,6 +393,9 @@ local function only(args, allowed)
   for k in pairs(args) do if not allowed[k] then fail('invalid_input', 'Unknown argument: ' .. tostring(k)) end end
 end
 
+-- start_size(template, root): the largest final-record size of a start of template at root (it is
+-- set after the engine, below).
+local start_size
 -- Save. The form submit and templates.save call save_core. values are the form's values
 -- ({name, root, pane_<block> = choice}); fill = true takes the capture's guess for a pane that
 -- has no value (the agent path), else such a pane means the session changed (the form path).
@@ -438,6 +441,13 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill)
     if layout then tabs[#tabs + 1] = {title = tab.title, layout = layout} end
   end
   if #tabs == 0 then fail('invalid_input', 'The template has no panes') end
+  -- The save check (tests/templates-run.md, "Save size"): refuse a template that cannot start at
+  -- this root. The template of a start has no saved_by (start_core).
+  local size = start_size({v = 1, name = name, tabs = tabs}, root)
+  if size > run_module.MAX_RUN then
+    fail('invalid_input', string.format('The template is too large to start: its start record needs about %d KiB at this root, and the limit is %d KiB. Leave out panes.',
+      math.ceil(size / 1024), math.floor(run_module.MAX_RUN / 1024)))
+  end
   -- saved_by: who saved it (information only; anyone may delete it).
   local template = {v = 1, name = name, tabs = tabs, saved_by = caller.id}
   local tkey = template_key(name)
@@ -556,6 +566,27 @@ local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = 
   changed = function() if invalidate then pcall(invalidate) end end,
   form_key = form_key, switch_key = switch_key, wake = function() if loop.pump then loop.pump() end end,
   retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end})
+-- start_size measures four references (engine.measure): a user and an agent start, each into a new
+-- and an existing session. The keys are built as op_keys builds them, with the longest agent ID
+-- and key of "<" (6 bytes each in JSON). The new session name is the template name (the default).
+-- The window ID and the session ID are MAX_ID bytes.
+start_size = function(template, root)
+  local key, id = string.rep('<', run_module.MAX_KEY), string.rep('<', run_module.MAX_ID)
+  local user_key, agent_key = 'start/' .. part(key), 'start/agent/' .. part(id) .. part(key)
+  local session = string.rep('x', run_module.MAX_ID)
+  local placement = {focus = {source_window_id = session}}
+  local refs = {
+    {key = user_key, new_session_name = template.name, placement = placement},
+    {key = user_key, session_id = session, placement = placement},
+    {key = agent_key, by = id, new_session_name = template.name},
+    {key = agent_key, by = id, session_id = session}}
+  local max = 0
+  for _, ref in ipairs(refs) do
+    ref.template, ref.root = template, root
+    max = math.max(max, engine.measure(ref))
+  end
+  return max
+end
 local function pump()
   if loop.timer then return end
   loop.timer = rex.after(0.05, function()

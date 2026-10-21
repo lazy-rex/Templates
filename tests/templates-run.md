@@ -224,6 +224,48 @@ Measured on a lab hub (tests/limits.lua): a run record is about 3 times its temp
 of 18 KB in one tab opens on both paths; one of 20 KB in one tab of two panes is refused on both
 paths. The user path and the agent path always have the same outcome.
 
+### Save size
+
+A run record holds its template about three times, so a template that its save accepts could be
+too large to start. Save (`save_core`, both paths) measures four reference starts of the new
+template at the save's resolved root R with `engine.measure`. Each reference is a valid request,
+built as `op_keys` builds the key:
+
+- a user start into a new session and into an existing session: the key `start/` + part(MAX_KEY
+  of `<`), and `placement.focus.source_window_id` of MAX_ID bytes;
+- an agent start into a new session and into an existing session: the key `start/agent/` +
+  part(MAX_ID of `<`) + part(MAX_KEY of `<`), and `by` of MAX_ID of `<`;
+- a new session named as the template; an existing session ID of MAX_ID bytes; the template
+  without `saved_by` (as `start_core`); the raw and the resolved root both R.
+
+`engine.measure` runs admission's validation and compile, and builds the same final record with a
+run ID of 32 digits. It reads no record and writes nothing. Admission measures with the actual run
+ID, as before. Save refuses the template with `invalid_input` when the largest reference is over
+MAX_RUN. The check comes after the replay of a saved save operation and before the only write, so
+a refused save writes no template and no operation.
+
+The guarantee covers the size check only, for valid start inputs and the same template content.
+Let J(s) be the length of `rex.json.encode(s)`, cwd_i the resolved directory of leaf i at the save,
+and N the template name. Save accepts the template. Then a start passes admission's size check
+when all of these hold:
+
+- (a) J(raw root) <= J(R) and J(resolved root) <= J(R);
+- (b) for each leaf i, J(resolved directory of leaf i at the start) <= J(cwd_i);
+- (c) for a new session, J(new_session_name) <= J(N);
+- (d) with a placement, J(source_window_id) <= MAX_ID + 2.
+
+The key, the agent ID, `by` and the run ID are always within the reference bounds. Each variable
+value is a whole JSON string in the final record, and the object keys are fixed, so the size is a
+fixed part plus the sum of J of the variable strings. (b) is a separate condition: a shorter root
+does not imply it, because a relative symlink can resolve to another suffix at another root.
+
+A start that breaks a condition can still get "too large to start" at admission. That refusal
+makes no run, no session and no run-counter change. `start_core` writes the `start-form` record
+before admission, so the frozen record stays: a retry with the same key gets the same refusal, and
+another request with that key gets `operation_conflict`. Records that exist already, or a template
+written by another writer, are not checked at save; admission still applies. Tests:
+`tests/save_size.lua` and the measure cases in `tests/engine.lua`.
+
 ## Verification
 
 `lazyrex-hub test` runs the controlled tests in `tests/engine.lua` (the cases are in
