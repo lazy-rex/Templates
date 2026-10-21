@@ -4,14 +4,21 @@ A [LazyRex](https://github.com/lazy-rex/LazyRex) plugin. Session templates: a na
 
 ## Limits
 
-A plugin reply over 64 KiB never arrives (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"), so
-each view and agent output has a size limit:
+A plugin reply over 64 KiB never arrives (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). These
+views and agent outputs have a size limit:
 
-- The panel and the Start form are at most 48 KiB each. The panel keeps the unfinished starts
-  first, then the templates, then the 10 newest other starts. The Start form keeps the template
-  options first, then the root default, then the sessions. A line counts what does not fit and
-  names the agent tool that shows it (`templates.runs`, `templates.list` or `templates.start`).
-- `templates.runs` gives pages of at most 40 KB.
+- The panel and the Start form are at most 48 KiB each. The panel keeps the stuck starts first
+  (blocked, pending, unknown and authorizing: the starts with Retry or Dismiss), then the
+  templates, then the 10 newest other starts (queued and starting starts are in this list). The
+  Start form keeps the template options first, then the root default, then the sessions. A line
+  counts what does not fit and names the agent tool that shows it (`templates.runs`,
+  `templates.list` or `templates.start`).
+- `templates.runs` and `templates.list` give pages of at most 40 KB. `templates.list` gives a
+  summary of each template; `templates.get` gives one template, at most 60 KiB.
+- A template name is the cursor of `templates.list`. A record that is not from Templates, with a
+  key that is not hex or a name over 8 KiB as JSON, stops the list: the page before it ends, and
+  the next page gives `too_large`. Templates does not delete such a record.
+- The Save as Template form has no size limit yet.
 
 ## Install
 

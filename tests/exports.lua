@@ -14,7 +14,8 @@ test('an agent saves a session; a retry replays; other content with the key is a
   expect(saved).to_equal({name = 'ws-agent'})
   expect(alice:call('templates.save', {name = 'ws-agent', root = root, session_id = s, key = 'save-1'})).to_equal({name = 'ws-agent'})
   expect_error(function() alice:call('templates.save', {name = 'ws-other', root = root, session_id = s, key = 'save-1'}) end, 'operation_conflict')
-  local t = find(alice:call('templates.list', {}).templates, 'name', 'ws-agent')
+  expect(find(alice:call('templates.list', {}).templates, 'name', 'ws-agent').tabs).to_be(2)
+  local t = alice:call('templates.get', {template = 'ws-agent'}).template
   expect(t.saved_by).to_be('alice')
   expect(#t.tabs).to_be(2)
   expect(t.tabs[1].layout.direction).to_be('horizontal')
@@ -22,7 +23,7 @@ test('an agent saves a session; a retry replays; other content with the key is a
   local skip = {}
   skip[c.panes[3].block_id] = 'skip'
   alice:call('templates.save', {name = 'ws-code', root = root, session_id = s, panes = skip, key = 'save-2'})
-  expect(#find(alice:call('templates.list', {}).templates, 'name', 'ws-code').tabs).to_be(1)
+  expect(#alice:call('templates.get', {template = 'ws-code'}).template.tabs).to_be(1)
 end)
 
 test('the user saves through the form; the template has no agent owner', function()

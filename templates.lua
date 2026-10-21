@@ -1049,9 +1049,6 @@ end
 
 -- Agent actions (exports; the hub forwards them as MCP tools). Each calls the handler of its UI
 -- action with the same checks.
-local function template_view(t)
-  return {name = t.name, tabs = t.tabs, saved_by = t.saved_by}
-end
 local function run_view(r)
   return {id = r.id, template = r.request.template.name, root = r.root, status = r.status, next_tab = r.next_tab,
     tabs = #r.tabs, error = r.error, by = r.request.by or 'user', session_id = r.session_id}
@@ -1090,12 +1087,110 @@ local function run_page(before, limit)
   end
   return {runs = page, next_before = next_before}
 end
+
+-- templates.list pages summaries {name, tabs = count, saved_by}, in the byte order of names. The
+-- storage key template/<hex name> is a template's identity: a row's name comes from its key, not
+-- from value.name, and the cursor after is a name (the scan starts after template/<hex after>).
+-- One page, encoded as the reply carries it with next_after, is at most LIST_BUDGET bytes; the
+-- page adds a row only when the result with that row and its name as next_after fits.
+-- next_after is the name of the last key that the page processed (listed, or passed over because
+-- its value is not a template), never the scan's own cursor: rows that a scan returned but the page
+-- did not use are read again by the next page. A key is cursorable when its suffix is hex and its
+-- name encodes to at most MAX_AFTER_JSON bytes, the bound of the after argument. A key that is not
+-- cursorable (only another writer makes one: save allows names of 60 bytes) blocks the list: a
+-- page ends before it, and a page that starts at it fails with too_large, as no cursor skips it.
+-- templates.get returns one template; its encoded reply is at most GET_BUDGET bytes.
+local LIST_BUDGET, LIST_LIMIT, LIST_MAX, MAX_AFTER_JSON, GET_BUDGET = 40 * 1024, 50, 100, 8192, 60 * 1024
+local NEXT_AFTER = #',"next_after":'
+local function unhex(s)
+  if #s % 2 ~= 0 or s:find('[^0-9a-f]') then return nil end
+  return (s:gsub('..', function(h) return string.char(tonumber(h, 16)) end))
+end
+-- named cuts a name for a message: at most 60 bytes on a UTF-8 boundary, no control characters.
+local function named(name)
+  name = name:gsub('%c', ' ')
+  if #name <= 60 then return '"' .. name .. '"' end
+  local cut = 57
+  while cut > 0 and cut > 54 and name:byte(cut + 1) >= 0x80 and name:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+  return '"' .. name:sub(1, cut) .. '…"'
+end
+-- list_result checks the encoded page again (a failure is a defect of the accounting).
+local function list_result(page, next_after)
+  local r = {templates = page, next_after = next_after}
+  if json_size(r) > LIST_BUDGET then fail('internal', 'A templates.list page is over its size bound') end
+  return r
+end
+local function list_page(after, limit)
+  if limit == nil then limit = LIST_LIMIT end
+  if type(limit) ~= 'number' or limit % 1 ~= 0 or limit < 1 or limit > LIST_MAX then
+    fail('invalid_input', 'limit is an integer from 1 to ' .. LIST_MAX)
+  end
+  if after ~= nil and (type(after) ~= 'string' or json_size(after) > MAX_AFTER_JSON) then
+    fail('invalid_input', 'after is a template name of at most ' .. MAX_AFTER_JSON .. ' bytes as JSON')
+  end
+  local page, size, last = {}, json_size({templates = {}}), nil
+  local scan_after, scan_limit = after and template_key(after) or nil, run_module.SCAN_LIMIT
+  while true do
+    local args = {prefix = 'template/', limit = scan_limit}
+    if scan_after then args.after = scan_after end
+    local ok, res = pcall(hub, 'hub.store.scan', args)
+    if not ok then
+      scan_limit = run_module.smaller(scan_limit, res)
+      if not scan_limit then error(res, 0) end
+    else
+      local keys = {}
+      for k in pairs(res.records or {}) do keys[#keys + 1] = k end
+      table.sort(keys)
+      for _, k in ipairs(keys) do
+        local name = unhex(k:sub(#'template/' + 1))
+        if not name or json_size(name) > MAX_AFTER_JSON then
+          if last ~= nil then return list_result(page, last) end
+          fail('too_large', 'The record ' .. named(k) .. ' is not a Templates record: its key is'
+            .. ' not hex or its name is over ' .. MAX_AFTER_JSON .. ' bytes as JSON. No cursor skips it.')
+        end
+        local value = res.records[k].value
+        local row, cost = nil, 0
+        if type(value) == 'table' and type(value.tabs) == 'table' then
+          if #page == limit then return list_result(page, last) end
+          row = {name = name, tabs = #value.tabs, saved_by = value.saved_by}
+          cost = json_size(row) + (#page > 0 and 1 or 0)
+        end
+        if size + cost + NEXT_AFTER + json_size(name) > LIST_BUDGET then
+          if #page == 0 and row then
+            fail('too_large', 'The template ' .. named(name) .. ' is too large to list (' .. json_size(row) ..
+              ' bytes). To list the templates after it, set after to its name: ' .. name)
+          end
+          return list_result(page, last)
+        end
+        if row then page[#page + 1], size = row, size + cost end
+        last = name
+      end
+      if not res.next then return list_result(page, nil) end
+      scan_after = res.next
+    end
+  end
+end
+local function get_template(name)
+  local key = template_key(text(name, 'template'))
+  local r = hub('hub.store.get', {keys = {key}}).records[key]
+  if not r or type(r.value) ~= 'table' or type(r.value.tabs) ~= 'table' then
+    fail('not_found', 'The template ' .. named(name) .. ' does not exist')
+  end
+  local reply = {template = {name = name, tabs = r.value.tabs, saved_by = r.value.saved_by}}
+  local n = json_size(reply)
+  if n > GET_BUDGET then
+    fail('too_large', 'The template ' .. named(name) .. ' is too large to read (' .. n .. ' bytes; the limit is ' .. GET_BUDGET .. ')')
+  end
+  return reply
+end
 local agent_handlers = {
   ['templates.list'] = function(_, args)
-    only(args, {})
-    local list = {}
-    for _, t in ipairs(templates()) do list[#list + 1] = template_view(t) end
-    return {templates = list}
+    only(args, {after = true, limit = true})
+    return list_page(args.after, args.limit)
+  end,
+  ['templates.get'] = function(_, args)
+    only(args, {template = true})
+    return get_template(args.template)
   end,
   ['templates.capture'] = function(caller, args)
     only(args, {session_id = true})
@@ -1135,8 +1230,12 @@ local agent_handlers = {
 local key_arg = {type = 'string', minLength = 1, description = 'Your operation key. Retry with the same key and content after an unknown outcome.'}
 local exports = {
   {name = 'templates.list', title = 'List session templates',
-    description = 'List the saved session templates: name, tabs (title and layout; each pane has a launch and a directory relative to the root) and saved_by.',
-    args = {type = 'object', properties = {}, additionalProperties = false}},
+    description = 'List the saved session templates by name, one page at a time: name, tabs (the number of tabs) and saved_by. A page has at most limit templates (default 50, at most 100) and at most about 40 KB. When more templates exist, the reply has next_after: pass it as after for the next page. templates.get gives one template with its tabs.',
+    args = {type = 'object', properties = {after = {type = 'string', description = 'A template name: list the templates after it (next_after of the previous page).'},
+      limit = {type = 'integer', minimum = 1, maximum = 100, description = 'The most templates in the page (default 50).'}}, additionalProperties = false}},
+  {name = 'templates.get', title = 'Get a session template',
+    description = 'Get one saved template: name, tabs (title and layout; each pane has a launch and a directory relative to the root) and saved_by. A template over about 60 KB gives too_large.',
+    args = {type = 'object', properties = {template = {type = 'string', minLength = 1}}, required = {'template'}, additionalProperties = false}},
   {name = 'templates.capture', title = 'Capture a session for a template',
     description = 'Read what Save as Template would save from a session (default: yours): each pane with its tab, directory, launch guess (shell or profile:<id>) and profile args, the profiles, and a root guess.',
     args = {type = 'object', properties = {session_id = {type = 'string', minLength = 1}}, additionalProperties = false}},
