@@ -16,8 +16,9 @@ views and agent outputs have a size limit:
 - `templates.runs` and `templates.list` give pages of at most 40 KB. `templates.list` gives a
   summary of each template; `templates.get` gives one template, at most 60 KiB.
 - A template name is the cursor of `templates.list`. A record that is not from Templates, with a
-  key that is not hex or a name over 8 KiB as JSON, stops the list: the page before it ends, and
-  the next page gives `too_large`. Templates does not delete such a record.
+  key that is not hex, a name that is not valid UTF-8, or a name over 8 KiB as JSON, stops the
+  list: the page before it ends, and the next page gives `too_large`. Templates does not delete
+  such a record.
 - The Save as Template form has no size limit yet.
 
 ## Install

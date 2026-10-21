@@ -231,3 +231,35 @@ test('an empty name is listed first and round-trips as a cursor', function()
   expect(page.next_after).to_be('')
   expect(a:call('templates.list', {after = '', limit = 1}).templates[1].name).to_be('a-big-1')
 end)
+
+-- Names that JSON does not keep: the encoder replaces an invalid UTF-8 byte with U+FFFD, so such a
+-- name as a cursor would sort before its key, and the list would repeat (the reviewer's probe:
+-- template/ff and template/ffff). Such a key blocks the list. Valid multibyte names are cursors.
+-- This test runs last: the keys template/ff... sort after every other name.
+test('a name that is not valid UTF-8 blocks the list; a valid multibyte name round-trips', function()
+  local a = agent('alice')
+  local e1, e2, e3 = '\195\169-1', '\195\169-2\255', '\195\169-3' -- "é-1", "é-2" and the byte ff, "é-3"
+  put(e1)
+  write({{key = 'template/' .. W.hex(e2), value = tpl('foreign')}})
+  put(e3)
+  local page = a:call('templates.list', {after = '\195\169', limit = 5})
+  expect(#page.templates).to_be(1)
+  expect(page.templates[1].name).to_be(e1)
+  expect(page.next_after).to_be(e1)
+  local err = expect_error(function() a:call('templates.list', {after = e1, limit = 5}) end, 'too_large')
+  expect(tostring(err.message)).to_match('No cursor skips it')
+  expect(#tostring(err.message) <= 512).to_be(true)
+  write({{key = 'template/' .. W.hex(e2), delete = true}})
+  -- Valid multibyte names: each next_after is accepted again and moves on.
+  page = a:call('templates.list', {after = '\195\169', limit = 1})
+  expect(page.next_after).to_be(e1)
+  expect(a:call('templates.list', {after = page.next_after, limit = 1}).templates[1].name).to_be(e3)
+  -- The probe: template/ff and template/ffff after the last valid name.
+  write({{key = 'template/ff', value = {name = 'foreign', tabs = {}, saved_by = 'user'}},
+    {key = 'template/ffff', value = {name = 'foreign', tabs = {}, saved_by = 'user'}}})
+  page = a:call('templates.list', {after = '\195\169', limit = 5})
+  expect(#page.templates).to_be(2)
+  expect(page.next_after).to_be(e3)
+  expect_error(function() a:call('templates.list', {after = e3, limit = 1}) end, 'too_large')
+  write({{key = 'template/ff', delete = true}, {key = 'template/ffff', delete = true}})
+end)

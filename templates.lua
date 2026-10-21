@@ -1096,9 +1096,10 @@ end
 -- next_after is the name of the last key that the page processed (listed, or passed over because
 -- its value is not a template), never the scan's own cursor: rows that a scan returned but the page
 -- did not use are read again by the next page. A key is cursorable when its suffix is hex and its
--- name encodes to at most MAX_AFTER_JSON bytes, the bound of the after argument. A key that is not
--- cursorable (only another writer makes one: save allows names of 60 bytes) blocks the list: a
--- page ends before it, and a page that starts at it fails with too_large, as no cursor skips it.
+-- name comes back unchanged from JSON within MAX_AFTER_JSON bytes, the bound of the after argument.
+-- A key that is not cursorable (only another writer makes one: save allows names of 60 bytes from
+-- a JSON request) blocks the list: a page ends before it, and a page that starts at it fails with
+-- too_large, as no cursor skips it.
 -- templates.get returns one template; its encoded reply is at most GET_BUDGET bytes.
 local LIST_BUDGET, LIST_LIMIT, LIST_MAX, MAX_AFTER_JSON, GET_BUDGET = 40 * 1024, 50, 100, 8192, 60 * 1024
 local NEXT_AFTER = #',"next_after":'
@@ -1113,6 +1114,14 @@ local function named(name)
   local cut = 57
   while cut > 0 and cut > 54 and name:byte(cut + 1) >= 0x80 and name:byte(cut + 1) < 0xC0 do cut = cut - 1 end
   return '"' .. name:sub(1, cut) .. '…"'
+end
+-- cursorable: the name comes back unchanged from the JSON round trip that an agent's after takes
+-- (the encoder replaces an invalid UTF-8 byte with U+FFFD, so such a name would give a cursor
+-- that sorts before its key: the list would repeat), and it is within the bound of after.
+local function cursorable(name)
+  if name == nil then return false end
+  local encoded = rex.json.encode(name)
+  return #encoded <= MAX_AFTER_JSON and rex.json.decode(encoded) == name
 end
 -- list_result checks the encoded page again (a failure is a defect of the accounting).
 local function list_result(page, next_after)
@@ -1143,10 +1152,10 @@ local function list_page(after, limit)
       table.sort(keys)
       for _, k in ipairs(keys) do
         local name = unhex(k:sub(#'template/' + 1))
-        if not name or json_size(name) > MAX_AFTER_JSON then
+        if not cursorable(name) then
           if last ~= nil then return list_result(page, last) end
           fail('too_large', 'The record ' .. named(k) .. ' is not a Templates record: its key is'
-            .. ' not hex or its name is over ' .. MAX_AFTER_JSON .. ' bytes as JSON. No cursor skips it.')
+            .. ' not hex, or its name is not valid UTF-8 or is over ' .. MAX_AFTER_JSON .. ' bytes as JSON. No cursor skips it.')
         end
         local value = res.records[k].value
         local row, cost = nil, 0
