@@ -31,11 +31,15 @@ test('no template option fits: the Start form has no submit and says to use temp
   expect(node(tree, 'start_session')).to_be(nil)
   expect(node(tree, 'no_template').text).to_be('The template list is too large for this form. Use templates.start.')
   expect(node(tree, 'cancel')).not_to_be(nil)
-  -- The panel does not show the template row (over the budget with its label and ID) and counts it.
+  -- The panel shows the row with a bounded label. Its route would be over 1024 bytes, so the row has
+  -- no action and names the agent tools.
   local panel = W.panel(s):render()
   expect(size(panel) <= BUDGET).to_be(true)
-  expect(#node(panel, 'templates').items).to_be(0)
-  expect(node(panel, 'more_templates').text).to_be('1 more template: use templates.list')
+  local row = node(panel, 'templates').items[1]
+  expect(#row.label <= 200).to_be(true)
+  expect(row.action.enabled).to_be(false)
+  expect(row.detail).to_be('Name too long for this panel: use templates.get or templates.delete')
+  expect(node(panel, 'more_templates')).to_be(nil)
   expect(node(panel, 'start').action.enabled).to_be(true)
 end)
 

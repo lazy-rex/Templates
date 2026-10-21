@@ -68,7 +68,7 @@ test('every template is listed once over more than 1 MiB of templates', function
   for _, t in ipairs(alice:call('templates.list', {}).templates) do names[#names + 1] = t.name:match('^big%-template%-(%d+)$') end
   once(names, 1, 18)
   names = {}
-  for _, item in ipairs(node(W.panel(s):render(), 'templates').items) do names[#names + 1] = item.id:match('^big%-template%-(%d+)$') end
+  for _, item in ipairs(node(W.panel(s):render(), 'templates').items) do names[#names + 1] = item.label:match('^big%-template%-(%d+)$') end
   once(names, 1, 18)
   names = {}
   local start = W.open('start_session', '/forms/start', s)

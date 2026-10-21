@@ -129,4 +129,20 @@ function W.start_form_key(key) return 'start-form/' .. W.hex('start/' .. W.part(
 -- The start record of an agent's start: 'start/agent/' .. part(agent) .. part(key).
 function W.start_form_key_agent(agent_id, key) return 'start-form/' .. W.hex('start/agent/' .. W.part(agent_id) .. W.part(key)) end
 function W.switch_record(key) return store('switch/' .. W.hex('start/' .. W.part(key))).value end
+-- ui_delete deletes a template as the user does in session s: the panel row opens the template
+-- menu, Delete… opens the confirmation (with the revision of that choice), and Delete submits it.
+-- It returns the final operation of the submit and the confirmation view.
+function W.ui_delete(s, name, key)
+  local hx = W.hex(name)
+  local p = W.panel(s)
+  p:render()
+  p:action('templates', 'open', {item_id = hx}, key .. '-open')
+  local menu = user:view('/forms/template/' .. hx, nil, s)
+  menu:render()
+  local rev = store('template/' .. hx).rev
+  menu:action('template_menu', 'delete', {item_id = 'delete'}, key .. '-menu')
+  local confirm = user:view('/forms/delete/' .. hx .. '/' .. rev, nil, s)
+  confirm:render()
+  return confirm:action('confirm', 'submit', {values = {}}, key), confirm
+end
 return W

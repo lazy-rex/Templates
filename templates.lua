@@ -38,6 +38,11 @@ end
 local function line(value) return (value:gsub('\n$', '')) end
 local function within(path, root) return path == root or root == '/' and path:sub(1, 1) == '/' or path:sub(1, #root + 1) == root .. '/' end
 local function hex(value) return (value:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end
+-- unhex: the text of a lowercase hex string of even length, or nil.
+local function unhex(s)
+  if #s % 2 ~= 0 or s:find('[^0-9a-f]') then return nil end
+  return (s:gsub('..', function(h) return string.char(tonumber(h, 16)) end))
+end
 local function json_size(v) return #rex.json.encode(v) end
 
 -- The engine is a sibling file. Observed on Rex 1203: debug.getinfo gives the script's absolute path.
@@ -192,14 +197,17 @@ end
 
 -- scan_all returns the values (tables) of every record under prefix. A page that is too large for
 -- a hub reply is asked for again with a smaller limit (templates_run.lua, "Store scans").
-local function scan_all(prefix)
+-- keyed = true gives {key, value} entries instead of the values.
+local function scan_all(prefix, keyed)
   local list, after, limit = {}, nil, run_module.SCAN_LIMIT
   repeat
     local args = {prefix = prefix, limit = limit}
     if after then args.after = after end
     local ok, page = pcall(hub, 'hub.store.scan', args)
     if ok then
-      for _, record in pairs(page.records or {}) do if type(record.value) == 'table' then list[#list + 1] = record.value end end
+      for key, record in pairs(page.records or {}) do
+        if type(record.value) == 'table' then list[#list + 1] = keyed and {key = key, value = record.value} or record.value end
+      end
       after = page.next
     else
       limit = run_module.smaller(limit, page)
@@ -210,11 +218,55 @@ local function scan_all(prefix)
 end
 
 -- Storage: template/<hex name> = {v = 1, name, tabs}. hex keeps any name a valid key.
+-- A template's identity is its storage key: value.name can differ in a record that Templates did
+-- not write. The panel and the forms name a template by the hex of its key.
 local function template_key(name) return 'template/' .. hex(name) end
+-- json_safe: the text comes back unchanged from a JSON round trip (rex.json.encode replaces an
+-- invalid UTF-8 byte with U+FFFD), so a form option or field can carry it.
+local function json_safe(s) return rex.json.decode(rex.json.encode(s)) == s end
+-- templates returns {hex, name, value} for each template record in key order. name is the name of
+-- the key when it is JSON-safe, else nil.
 local function templates()
-  local list = scan_all('template/')
-  table.sort(list, function(a, b) return a.name < b.name end)
+  local list = {}
+  for _, e in ipairs(scan_all('template/', true)) do
+    local hx = e.key:sub(#'template/' + 1)
+    local name = unhex(hx)
+    list[#list + 1] = {hex = hx, name = name and json_safe(name) and name or nil, value = e.value}
+  end
+  table.sort(list, function(a, b) return a.hex < b.hex end)
   return list
+end
+-- display returns a text for a view: control characters become spaces, and a text over 200 bytes
+-- is cut on a UTF-8 boundary, with "…".
+local DISPLAY_MAX = 200
+local function display(s)
+  s = tostring(s):gsub('%c', ' ')
+  if #s <= DISPLAY_MAX then return s end
+  local cut = DISPLAY_MAX - 3
+  while cut > 0 and s:byte(cut + 1) >= 0x80 and s:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+  return s:sub(1, cut) .. '…'
+end
+-- Template routes (the panel's navigation). Each is an exact pattern; the hex must be the
+-- lowercase hex of a name and the rev 1 to 20 digits. A route over ROUTE_MAX bytes is not used:
+-- the panel row of such a template has no action.
+local ROUTE_MAX = 1024
+-- navigable: the longest route of a panel row (the delete confirmation, a 20-digit rev) fits.
+local function navigable(hx) return #('/forms/delete/' .. hx .. '/' .. string.rep('9', 20)) <= ROUTE_MAX end
+local function route_hex(route, prefix)
+  local hx = route:match('^' .. prefix .. '(%x+)$')
+  if not hx or not unhex(hx) or hex(unhex(hx)) ~= hx then fail('invalid_input', 'Unknown route') end
+  return hx
+end
+local function delete_route(route)
+  local hx, rev = route:match('^/forms/delete/(%x+)/(%d+)$')
+  if not hx or not unhex(hx) or hex(unhex(hx)) ~= hx or #rev > 20 then fail('invalid_input', 'Unknown route') end
+  return hx, rev
+end
+-- read_template returns the record template/<hx> ({rev, value}) or nil when it has no table value.
+local function read_template(hx)
+  local key = 'template/' .. hx
+  local r = hub('hub.store.get', {keys = {key}}).records[key]
+  if r and type(r.value) == 'table' then return r end
 end
 local function load_template(name)
   local key = template_key(text(name, 'template'))
@@ -225,8 +277,8 @@ end
 
 -- A form's operation key makes a submit safe to retry. The saved result answers a retry.
 
-local function cancel_node()
-  return {id = 'cancel', type = 'widget', text = '', action = {name = '$cancel', label = 'Cancel', enabled = true}}
+local function cancel_node(label)
+  return {id = 'cancel', type = 'widget', text = '', action = {name = '$cancel', label = label or 'Cancel', enabled = true}}
 end
 local function context_of(args)
   local context = args.context
@@ -895,8 +947,14 @@ local function render_panel()
   end
   local hidden_templates = 0
   for _, t in ipairs(list) do
-    local item = {id = t.name, label = t.name, detail = count(#t.tabs, 'tab', 'tabs'),
-      action = {name = 'delete', label = 'Delete', enabled = true, tool = 'templates.delete'}}
+    -- The row opens the template's menu (Start session…, Delete…); its ID is the hex of the key.
+    local tabs = type(t.value.tabs) == 'table' and #t.value.tabs or 0
+    local item = {id = t.hex, label = display(t.name or t.value.name or t.hex), detail = count(tabs, 'tab', 'tabs'),
+      action = {name = 'open', label = 'Open', enabled = true, user_only = 'navigation'}}
+    if not navigable(t.hex) then
+      item.action.enabled = false
+      item.detail = 'Name too long for this panel: use templates.get or templates.delete'
+    end
     if not add(budget, template_items, {item}) then hidden_templates = hidden_templates + 1 end
   end
   local others = 0
@@ -941,12 +999,26 @@ local function more_options_text(t, s)
   if s > 0 then parts[#parts + 1] = count(s, 'more session', 'more sessions') end
   return table.concat(parts, ' and ') .. ' are not in the lists: use templates.start.'
 end
-local function start_view(context, view_id)
+-- start_view renders the Start form. hx (from /forms/start/<hex>): the template of that key is the
+-- selected option, reserved before the others; the form never selects another template instead.
+local function start_view(context, view_id, hx)
   local waiting = starting[view_id]
   local nodes = {}
   if waiting then nodes[1] = {id = 'starting', type = 'widget', text = 'Starting… The app goes to the new session when its first tab opens.'} end
   local tree = {title = 'Start Session', nodes = nodes,
     status = waiting and {state = 'working', msg = 'Starting'} or {state = 'blocked', kind = 'question', msg = 'Waiting for input'}}
+  local want
+  if hx then
+    local r, name, reason = read_template(hx), unhex(hx), nil
+    if not r then reason = 'This template no longer exists.'
+    elseif not json_safe(name) then reason = 'The name of this template cannot be used in a form. Use templates.start.'
+    else want = {hex = hx, name = name, value = r.value} end
+    if reason then
+      nodes[#nodes + 1] = {id = 'no_template', type = 'widget', text = reason}
+      nodes[#nodes + 1] = cancel_node()
+      return checked({tree = tree}, 'Start Session', true)
+    end
+  end
   local list = templates()
   if #list == 0 then
     nodes[#nodes + 1] = {id = 'empty', type = 'widget', text = 'No templates yet. Use Save as Template… in a session first.'}
@@ -969,12 +1041,27 @@ local function start_view(context, view_id)
   local budget = {size = json_size(reply)}
   if budget.size > VIEW_BUDGET then return too_large_view('Start Session', true) end
   local hidden_templates, hidden_sessions = 0, 0
+  -- An option's value is the name of the record's key (its identity); a key whose name is not
+  -- JSON-safe has no option. The first option is also the default value ('' in the skeleton: 2
+  -- bytes).
+  local function option(t)
+    local tabs = type(t.value.tabs) == 'table' and #t.value.tabs or 0
+    return {value = t.name, label = display(t.name) .. ' · ' .. count(tabs, 'tab', 'tabs')}
+  end
+  if want then
+    if not add(budget, options, {option(want)}, json_size(want.name) - 2) then
+      nodes[first], nodes[first + 1], nodes[first + 2] = {id = 'no_template', type = 'widget',
+        text = 'This template does not fit in this form. Use templates.start.'}, cancel_node(), nil
+      return checked({tree = tree}, 'Start Session', true)
+    end
+    fields[1].value = want.name
+  end
   for _, t in ipairs(list) do
-    local option = {value = t.name, label = t.name .. ' · ' .. count(#t.tabs, 'tab', 'tabs')}
-    -- The first option is also the default value ('' in the skeleton: 2 bytes).
-    if add(budget, options, {option}, #options == 0 and json_size(t.name) - 2 or 0) then
-      if #options == 1 then fields[1].value = t.name end
-    else hidden_templates = hidden_templates + 1 end
+    if not (want and t.hex == want.hex) then
+      if t.name and add(budget, options, {option(t)}, #options == 0 and json_size(t.name) - 2 or 0) then
+        if #options == 1 then fields[1].value = t.name end
+      else hidden_templates = hidden_templates + 1 end
+    end
   end
   if #options == 0 then
     nodes[first], nodes[first + 1], nodes[first + 2] = {id = 'no_template', type = 'widget',
@@ -987,8 +1074,8 @@ local function start_view(context, view_id)
     budget.size = budget.size + json_size(root) - 2
   end
   for _, s in ipairs(hub('hub.session.list').sessions or {}) do
-    local option = {value = s.session_id, label = (s.label or '') ~= '' and s.label or s.session_id}
-    if not add(budget, sessions, {option}) then hidden_sessions = hidden_sessions + 1 end
+    local opt = {value = s.session_id, label = (s.label or '') ~= '' and s.label or s.session_id}
+    if not add(budget, sessions, {opt}) then hidden_sessions = hidden_sessions + 1 end
   end
   if hidden_templates + hidden_sessions > 0 then
     more.text = more_options_text(hidden_templates, hidden_sessions)
@@ -998,10 +1085,47 @@ local function start_view(context, view_id)
   return checked(reply, 'Start Session', true)
 end
 
+local WAITING = {state = 'blocked', kind = 'question', msg = 'Waiting for input'}
+-- The template menu (/forms/template/<hex>): the panel row's action. It names the template by its
+-- key and offers Start session… and Delete… (navigation only).
+local function menu_view(hx)
+  local r, nodes = read_template(hx), {}
+  if not r then
+    nodes[1] = {id = 'missing', type = 'widget', text = 'This template no longer exists.'}
+  else
+    local summary = count(type(r.value.tabs) == 'table' and #r.value.tabs or 0, 'tab', 'tabs')
+    if type(r.value.saved_by) == 'string' then summary = summary .. ' · saved by ' .. display(r.value.saved_by) end
+    nodes[1] = {id = 'summary', type = 'widget', text = summary}
+    nodes[2] = {id = 'template_menu', type = 'list', label = 'Template', items = {
+      {id = 'start', label = 'Start session…', action = {name = 'start', label = 'Start session…', enabled = true, user_only = 'navigation'}},
+      {id = 'delete', label = 'Delete…', action = {name = 'delete', label = 'Delete…', enabled = true, user_only = 'navigation'}}}}
+  end
+  nodes[#nodes + 1] = cancel_node('Close')
+  return checked({tree = {title = display(unhex(hx)), menu = true, nodes = nodes, status = WAITING}}, 'Template', true)
+end
+-- The delete confirmation (/forms/delete/<hex>/<rev>): <rev> is the template's revision when the
+-- user chose Delete…. It shows that revision only; another revision, or no record, has no submit.
+local function delete_view(hx, rev)
+  local r, nodes = read_template(hx), {}
+  if not r or r.rev ~= rev then
+    nodes[1] = {id = 'changed', type = 'widget', text = 'The template changed or was deleted after you chose Delete.'}
+  else
+    local tabs = count(type(r.value.tabs) == 'table' and #r.value.tabs or 0, 'tab', 'tabs')
+    nodes[1] = {id = 'question', type = 'widget', text = 'Delete the template ' .. display(unhex(hx)) .. ' (' .. tabs .. ')? This cannot be undone.'}
+    nodes[2] = {id = 'confirm', type = 'form', fields = {},
+      submit_action = {name = 'submit', label = 'Delete', enabled = true, tool = 'templates.delete'}}
+  end
+  nodes[#nodes + 1] = cancel_node()
+  return checked({tree = {title = 'Delete Template', nodes = nodes, status = WAITING}}, 'Delete Template', true)
+end
+
 local function render(args)
   if args.route == '/panels/templates' then return render_panel() end
   local context = context_of(args)
   if args.route == '/forms/start' then return start_view(context, args.view_id) end
+  if args.route:sub(1, 13) == '/forms/start/' then return start_view(context, args.view_id, route_hex(args.route, '/forms/start/')) end
+  if args.route:sub(1, 16) == '/forms/template/' then return menu_view(route_hex(args.route, '/forms/template/')) end
+  if args.route:sub(1, 14) == '/forms/delete/' then return delete_view(delete_route(args.route)) end
   local tree
   if args.route == '/forms/save' then
     local cap = capture(context.session_id)
@@ -1035,6 +1159,21 @@ local function delete_core(caller, keys, name)
   if stored.op_exists then return prior_op(keys, fingerprint) end
   if stored.conflict then fail('conflict', 'The template changed; try again') end
   return {}
+end
+-- The panel's delete (/forms/delete/<hex>/<rev>): the key and the revision come from the route that
+-- the user confirmed, never from submitted values. The batch deletes only that revision (if_rev),
+-- with no read before it, so a template replaced after the choice is kept. The replay answers
+-- first.
+local function delete_ui(keys, hx, rev)
+  local fingerprint = 'delete-ui-v1/' .. part(hx) .. part(rev)
+  local prior = prior_op(keys, fingerprint)
+  if prior then return prior end
+  local result = {close_form = true}
+  local stored = hub('hub.store.batch', {ops = {{key = 'template/' .. hx, if_rev = rev, delete = true}},
+    op = {key = keys[1], fingerprint = fingerprint, result = result}})
+  if stored.op_exists then return prior_op(keys, fingerprint) end
+  if stored.conflict then fail('conflict', 'The template changed after you chose Delete. Open it again.') end
+  return result
 end
 
 -- Dismiss and retry act on one run, from the user or any agent. An agent's run still dispatches
@@ -1087,12 +1226,36 @@ local function action(args)
     if args.node_id ~= 'start_session' or args.action ~= 'submit' then fail('invalid_input', 'Unknown form action') end
     return start_session(args)
   end
+  if args.route:sub(1, 13) == '/forms/start/' then
+    route_hex(args.route, '/forms/start/')
+    if args.node_id ~= 'start_session' or args.action ~= 'submit' then fail('invalid_input', 'Unknown form action') end
+    return start_session(args)
+  end
+  if args.route:sub(1, 16) == '/forms/template/' then
+    local hx = route_hex(args.route, '/forms/template/')
+    if args.node_id == 'template_menu' and args.action == 'start' then return {form = '/forms/start/' .. hx} end
+    if args.node_id == 'template_menu' and args.action == 'delete' then
+      -- The confirmation keeps the revision of this choice ('0': the record is gone).
+      local r = read_template(hx)
+      return {form = '/forms/delete/' .. hx .. '/' .. (r and r.rev or '0')}
+    end
+    fail('invalid_input', 'Unknown form action')
+  end
+  if args.route:sub(1, 14) == '/forms/delete/' then
+    local hx, rev = delete_route(args.route)
+    if args.node_id ~= 'confirm' or args.action ~= 'submit' then fail('invalid_input', 'Unknown form action') end
+    return delete_ui(op_keys('delete', USER, args.operation_key), hx, rev)
+  end
   if args.route == '/panels/templates' then
     if args.node_id == 'start' then return {form = '/forms/start'} end
     if args.node_id == 'save' then return {form = '/forms/save'} end
     local item = type(args.input) == 'table' and args.input.item_id
-    if args.node_id == 'templates' and args.action == 'delete' then
-      return delete_core(USER, op_keys('delete', USER, args.operation_key), item)
+    if args.node_id == 'templates' and args.action == 'open' and type(item) == 'string' then
+      local hx = route_hex('/forms/template/' .. item, '/forms/template/')
+      if not navigable(hx) then
+        fail('invalid_input', 'Name too long for this panel: use templates.get or templates.delete')
+      end
+      return {form = '/forms/template/' .. hx}
     end
     if args.node_id == 'stuck' and type(item) == 'string' then
       if args.action == 'dismiss' and item:sub(1, 8) == 'dismiss:' then
@@ -1162,10 +1325,6 @@ end
 -- templates.get returns one template; its encoded reply is at most GET_BUDGET bytes.
 local LIST_BUDGET, LIST_LIMIT, LIST_MAX, MAX_AFTER_JSON, GET_BUDGET = 40 * 1024, 50, 100, 8192, 60 * 1024
 local NEXT_AFTER = #',"next_after":'
-local function unhex(s)
-  if #s % 2 ~= 0 or s:find('[^0-9a-f]') then return nil end
-  return (s:gsub('..', function(h) return string.char(tonumber(h, 16)) end))
-end
 -- named cuts a name for a message: at most 60 bytes on a UTF-8 boundary, no control characters.
 local function named(name)
   name = name:gsub('%c', ' ')

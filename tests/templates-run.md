@@ -185,6 +185,45 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   call to Templates. A new Start form with the same key is refused by the hub
   (`operation_conflict`). A read hook proves that Templates does not read the record.
 
+## Panel delete
+
+A template row in the Templates panel opens the template menu. One Enter does not delete a
+template. Code: `templates.lua`, `menu_view`, `delete_view`, `delete_ui`. Tests:
+`tests/delete_confirm.lua`.
+
+- **Identity.** A template is named by the hex of its storage key (`template/<hex>`), not by
+  `value.name`: a record that Templates did not write can have another name inside. The panel row
+  ID, the routes and every read use that hex.
+- **Routes.** The hub opens any form route that starts with `/forms/` (checked in the source of hub
+  6c48bf7, and observed with a lab probe on Rex 0.0.1792158932-g88fd41: the route reached render
+  and action unchanged). Each route is an exact pattern. Anything else is `invalid_input`, at
+  render and at action:
+  - `/forms/template/<hex>`: the menu, with Start session… and Delete… (navigation only);
+  - `/forms/start/<hex>`: the Start form with that template selected;
+  - `/forms/delete/<hex>/<rev>`: the confirmation of the revision of the Delete… choice.
+
+  The hex is the lowercase hex of a name (it round-trips). The rev is 1 to 20 digits, kept as an
+  exact string. A route over 1024 bytes is not used: such a row (a name over about 500 bytes) has
+  no action and names `templates.get` and `templates.delete`. The agent tools have no such limit.
+- **Missing.** A valid route whose record is gone shows "This template no longer exists." (the
+  menu and the Start form) or "The template changed or was deleted after you chose Delete." (the
+  confirmation), with no submit.
+- **Start.** The selected option is reserved before the other options, and it is the default
+  value. An option's value is the name of the key. A key whose name is not JSON-safe (for example
+  not valid UTF-8) cannot be an option: that Start form says so and has no submit. The form never
+  selects another template instead.
+- **Delete.** The key and the rev come from the route only. The replay of a saved operation answers
+  first. Then one batch deletes `template/<hex>` with `if_rev` = rev, with no read before it: a
+  template replaced after the choice is kept (`conflict`). The fingerprint is
+  `delete-ui-v1/` + part(hex) + part(rev), so the same operation key on another route is
+  `operation_conflict`. The result is `{close_form = true}`: the hub returns to the panel.
+- **Texts.** A displayed name, `saved_by` and title are at most 200 bytes (cut on a UTF-8 boundary,
+  with "…"). Each form is checked against the view budget (48 KiB).
+- **Cancel.** The renderer's Cancel quits its process (hub `view/menu.go`, `cancelForm`). The tests
+  close the form pane (`block.close`) instead. That proves the hub's return to the panel, not a
+  keypress in the renderer (untested).
+- The agent tool `templates.delete` does not change: it deletes by name, with no confirmation.
+
 ## Size bounds
 
 One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The

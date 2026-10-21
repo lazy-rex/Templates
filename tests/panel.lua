@@ -11,10 +11,8 @@ test('C a retried delete keeps a newer template with the same name', function()
   alice:call('templates.save', {name = 'web', root = root, session_id = s, key = 'c-save-2'})
   expect(alice:call('templates.delete', {template = 'web', key = 'c-delete'})).to_equal({})
   expect(W.template('web')).not_to_be(nil)
-  -- The user's delete in the panel also commits with its result.
-  local p = W.panel(s)
-  p:render()
-  expect(p:action('templates', 'delete', {item_id = 'web'}, 'c-ui-delete').status).to_be('succeeded')
+  -- The user's delete in the panel (the menu, then the confirmation) also commits with its result.
+  expect(W.ui_delete(s, 'web', 'c-ui-delete').status).to_be('succeeded')
   expect(W.template('web')).to_be(nil)
 end)
 

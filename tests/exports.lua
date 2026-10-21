@@ -80,10 +80,12 @@ test('delete: an agent deletes any template, also one that another agent saved',
   expect(find(alice:call('templates.list', {}).templates, 'name', 'd-user')).to_be(nil)
   local p = panel(s)
   local tree = p:render()
-  -- The panel lists the remaining template by its name, with Delete.
+  -- The panel lists the remaining template by its name. The row opens its menu; Delete is in the
+  -- confirmation (tool templates.delete).
   expect(node(tree, 'templates').items[1].label).to_be('d-alice-2')
-  expect(node(tree, 'templates').items[1].action.tool).to_be('templates.delete')
-  expect(p:action('templates', 'delete', {item_id = 'd-alice-2'}, 'ui-del-1').status).to_be('succeeded')
+  expect(node(tree, 'templates').items[1].action.user_only).to_be('navigation')
+  local op, confirm = W.ui_delete(s, 'd-alice-2', 'ui-del-1')
+  expect(op.status).to_be('succeeded')
   local list = alice:call('templates.list', {}).templates
   expect(find(list, 'name', 'd-alice')).to_be(nil)
   expect(find(list, 'name', 'd-alice-2')).to_be(nil)
