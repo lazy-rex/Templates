@@ -22,8 +22,9 @@ directory under that root. So one template can start a project in any checkout o
 3. Check the root. The default is the git root of the panes, or else their deepest common
    directory. Every pane that you keep must be under the root.
 4. For each pane, choose its launch: the profile it ran, **Shell**, or **Leave out**. A pane that
-   LazyRex started from a profile has that profile already. A pane with an idle shell has
-   **Shell**. A pane that runs another program needs your choice.
+   LazyRex started from a profile has that profile already. A pane whose idle shell Templates
+   recognizes has **Shell**. Other panes need your choice: a pane that runs another program, and
+   a pane whose shell runs under a login wrapper.
 5. Choose **Save template**.
 
 Floating panes and LazyRex's own panes (its forms and panels) are not saved.
@@ -34,8 +35,9 @@ Floating panes and LazyRex's own panes (its forms and panels) are not saved.
 2. Choose the template and the root directory.
 3. For **Session**, choose **New session…** (with an optional name; the default is the template's
    name), or an open session to add the tabs to.
-4. Choose **Start session**. The tabs open one after another. In a new session, the app goes to that session when
-   its first tab opens.
+4. Choose **Start session**. The tabs open one after another. For a new session, the app tries to
+   switch to it when its first tab opens. If it cannot, **Templates…** says why: use Go to
+   Session in the Rex app.
 
 You can also open **Templates…** from the palette, choose a template, and choose
 **Start session…**.
@@ -53,7 +55,8 @@ template. If the template changed after you chose Delete, nothing is deleted.
 ### Follow a start
 
 **Templates…** also lists the recent starts. A start that stopped (for example, a tab that could
-not open) shows **Retry** and **Dismiss**.
+not open) shows **Retry** and **Dismiss**. Dismiss opens no more tabs; it does not close the panes
+that are open.
 
 ### What agents can do
 
@@ -67,11 +70,13 @@ An agent that is connected to LazyRex uses these actions (MCP tools):
 | `templates.save` | Saves a session as a template. To replace a template, pass `replace` with the `rev` from `templates.get`. |
 | `templates.start` | Starts a template in a root, in a new session or an open one. The agent owns the panes that it starts. |
 | `templates.runs` | Lists the starts and their status. |
-| `templates.retry`, `templates.dismiss` | Try a stopped start again, or close it. |
+| `templates.retry`, `templates.dismiss` | Try a stopped start again, or stop it. Dismiss opens no more tabs; the panes and the session that are open stay. |
 | `templates.delete` | Deletes a template by name, with no confirmation. |
 
 Each action that changes something takes a `key`. A retry with the same key and the same
-arguments returns the first result and does not act twice.
+arguments returns the first result and does not act twice. One exception: a start is removed
+after many newer finished starts (see "Retention"). Then its key gives `expired` for 30 days, and
+after that the key starts a new start.
 
 ## Limits
 
