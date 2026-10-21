@@ -28,6 +28,15 @@ views and agent outputs have a size limit:
   bytes has no action: use `templates.get` or `templates.delete`. Details: `tests/templates-run.md`,
   "Panel delete".
 
+## Known issue: an open Save form slows starts (open)
+
+The hub renders an open Save form again after each store change of the plugin and each worker
+change, and a start makes many of these. Each render captures the source session again. A Save
+render now checks each directory once (`tests/templates-run.md`, "Save form renders"). The
+latency target (a start with the Save form open takes at most twice the time of a start without
+it) is not met yet: 2.1 times in a lab run on a loaded host. The Save form will declare its render
+dependencies when the hub supports them. A quiet performance run follows that change.
+
 ## Retention
 
 Templates keeps every unfinished start and the newest 200 eligible finished starts. An older
