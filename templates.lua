@@ -38,6 +38,7 @@ end
 local function line(value) return (value:gsub('\n$', '')) end
 local function within(path, root) return path == root or root == '/' and path:sub(1, 1) == '/' or path:sub(1, #root + 1) == root .. '/' end
 local function hex(value) return (value:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end
+local function json_size(v) return #rex.json.encode(v) end
 
 -- The engine is a sibling file. Observed on Rex 1203: debug.getinfo gives the script's absolute path.
 local here = debug.getinfo(1, 'S').source:gsub('^@', '')
@@ -563,20 +564,6 @@ local function source_dir(context)
   if not cwd then return nil end
   return git_root(cwd) or cwd
 end
-local function start_fields(context, list)
-  local options = {}
-  for _, t in ipairs(list) do options[#options + 1] = {value = t.name, label = t.name .. ' · ' .. #t.tabs .. ' tab' .. (#t.tabs == 1 and '' or 's')} end
-  local sessions = {{value = '@new', label = 'New session…'}}
-  for _, s in ipairs(hub('hub.session.list').sessions or {}) do
-    sessions[#sessions + 1] = {value = s.session_id, label = (s.label or '') ~= '' and s.label or s.session_id}
-  end
-  return {
-    {id = 'template', label = 'Template', kind = 'select', required = true, value = list[1].name, options = options},
-    {id = 'root', label = 'Root (the directory the panes are relative to)', kind = 'text', required = true, value = source_dir(context) or ''},
-    {id = 'session_id', label = 'Session', kind = 'select', required = true, value = '@new', options = sessions},
-    {id = 'session_name', label = 'New session name (default: the template name)', kind = 'text', value = ''},
-  }
-end
 -- A start into a new session switches the app to it (the maintainer, 2026-10-19; coordinator's rules).
 -- The form stays open ({status = 'running'}: the hub calls the action again about every 0.5 s)
 -- until the first tab opens, the start stops, or SWITCH_WAIT seconds pass. Then the plugin asks
@@ -767,46 +754,195 @@ local function switch_notice(runs)
     .. (switch_reasons[sw.code] or tostring(sw.message)) .. '. To go there, use Go to Session in the Rex app.'
 end
 local function stuck(r) return r.status == 'blocked' or r.status == 'pending' or r.status == 'unknown' or r.status == 'authorizing' end
-local function render_panel()
-  local items = {}
-  for _, t in ipairs(templates()) do
-    items[#items + 1] = {id = t.name, label = t.name, detail = #t.tabs .. ' tab' .. (#t.tabs == 1 and '' or 's'),
-      action = {name = 'delete', label = 'Delete', enabled = true, tool = 'templates.delete'}}
+local function finished(r) return r.status == 'open' or r.status == 'failed' or r.status == 'closed' or r.status == 'dismissed' end
+
+-- View size. render replies with the whole view tree, and a plugin reply over 64 KiB never
+-- arrives (LazyRex docs/rex-protocol.md, "Rex Lua runtime"). The panel and the Start form keep the
+-- encoded reply {tree = ...} at most VIEW_BUDGET bytes. Each view builds a skeleton first: the
+-- constant parts, every list empty, each value that can be long empty, and each omitted-count
+-- widget at its largest text (MAX_COUNT). Then it adds rows in priority order while they fit. JSON
+-- is a concatenation, so the size of the reply is the skeleton plus each added row and its comma.
+-- The view then sets the real counts and drops the empty parts (the reply only gets smaller), and
+-- a last encode checks it. A view over the budget at either check is replaced by too_large_view.
+local VIEW_BUDGET, MAX_COUNT = 48 * 1024, 9999999999
+-- add appends the items to list, all or none, when they fit. extra is a change of size outside the
+-- list (a value that the first item sets).
+local function add(budget, list, items, extra)
+  local cost, n = extra or 0, #list
+  for _, item in ipairs(items) do
+    cost = cost + json_size(item) + (n > 0 and 1 or 0)
+    n = n + 1
   end
-  local nodes = {
-    {id = 'start', type = 'widget', text = '', action = {name = 'start', label = 'Start Session…', enabled = #items > 0, user_only = 'navigation'}},
-    {id = 'save', type = 'widget', text = '', action = {name = 'save', label = 'Save this session as a template…', enabled = true, user_only = 'navigation'}},
-    {id = 'templates', type = 'list', label = 'Templates', items = items},
-  }
-  -- Every stuck start is listed (its create answer was lost, or a call failed), so it can always be
-  -- dismissed; Dismiss closes no pane. A blocked start also gets a Retry row. Then the 10 newest
-  -- other starts. A pending start waits for the hub.
-  local stuck_items, recent_items = {}, {}
-  local runs = recent_runs()
+  if budget.size + cost > VIEW_BUDGET then return false end
+  for _, item in ipairs(items) do list[#list + 1] = item end
+  budget.size = budget.size + cost
+  return true
+end
+local function count(n, one, many) return n .. ' ' .. (n == 1 and one or many) end
+local function too_large_view(title, form)
+  local nodes = {{id = 'too_large', type = 'widget', text = 'This view is too large to show. Use the templates agent tools.'}}
+  if form then nodes[2] = cancel_node() end
+  return {tree = {title = title, nodes = nodes}}
+end
+local function checked(reply, title, form)
+  if json_size(reply) > VIEW_BUDGET then return too_large_view(title, form) end
+  return reply
+end
+
+-- Templates panel. Display order: the switch notice, Start, Save, the templates, the unfinished
+-- starts (stuck: blocked, pending, unknown, authorizing; each with Dismiss, a blocked one also with
+-- Retry) and the 10 newest other starts. Budget priority: the notice, the stuck starts (newest
+-- first; the rows of one start fit together or not at all), the templates, the 10 newest other
+-- starts. The omitted-count widgets count hidden starts and templates, not rows.
+local function more_runs_text(unfinished, done)
+  local parts = {}
+  if unfinished > 0 then parts[#parts + 1] = count(unfinished, 'more unfinished start', 'more unfinished starts') end
+  if done > 0 then parts[#parts + 1] = done .. ' more finished' .. (#parts == 0 and (done == 1 and ' start' or ' starts') or '') end
+  return table.concat(parts, ', ') .. ': use templates.runs'
+end
+local function more_templates_text(n) return count(n, 'more template', 'more templates') .. ': use templates.list' end
+local function render_panel()
+  local list, runs = templates(), recent_runs()
+  local template_items, stuck_items, recent_items = {}, {}, {}
+  local start = {id = 'start', type = 'widget', text = '', action = {name = 'start', label = 'Start Session…', enabled = #list > 0, user_only = 'navigation'}}
+  local save = {id = 'save', type = 'widget', text = '', action = {name = 'save', label = 'Save this session as a template…', enabled = true, user_only = 'navigation'}}
+  local tlist = {id = 'templates', type = 'list', label = 'Templates', items = template_items}
+  local more_templates = {id = 'more_templates', type = 'widget', text = more_templates_text(MAX_COUNT)}
+  local slist = {id = 'stuck', type = 'list', label = 'Unfinished starts', items = stuck_items}
+  local rlist = {id = 'runs', type = 'list', label = 'Recent starts', items = recent_items}
+  local more_runs = {id = 'more_runs', type = 'widget', text = more_runs_text(MAX_COUNT, MAX_COUNT)}
+  local nodes = {start, save, tlist, more_templates, slist, rlist, more_runs}
+  local reply = {tree = {title = 'Templates', nodes = nodes}}
+  local budget = {size = json_size(reply)}
+  if budget.size > VIEW_BUDGET then return too_large_view('Templates') end
+  -- The notice goes before the other nodes: its comma is counted with it (extra = 1).
+  local text = switch_notice(runs)
+  local notice = text and {id = 'switch', type = 'widget', text = text}
+  if notice and not add(budget, {}, {notice}, 1) then notice = nil end
+  local shown = {}
   for _, r in ipairs(runs) do
-    local label = r.request.template.name .. ' in ' .. short(r.root)
     if stuck(r) then
       -- The label names the action, as the home's failed workers do ("· Dismiss").
+      local label, detail = r.request.template.name .. ' in ' .. short(r.root), run_detail(r)
+      local rows = {}
       if r.status == 'blocked' then
-        stuck_items[#stuck_items + 1] = {id = 'retry:' .. r.id, label = label .. ' · Retry', detail = run_detail(r),
+        rows[1] = {id = 'retry:' .. r.id, label = label .. ' · Retry', detail = detail,
           action = {name = 'retry', label = 'Retry', enabled = true, tool = 'templates.retry'}}
       end
-      stuck_items[#stuck_items + 1] = {id = 'dismiss:' .. r.id, label = label .. ' · Dismiss', detail = run_detail(r),
+      rows[#rows + 1] = {id = 'dismiss:' .. r.id, label = label .. ' · Dismiss', detail = detail,
         action = {name = 'dismiss', label = 'Dismiss', enabled = true, tool = 'templates.dismiss'}}
-    elseif #recent_items < 10 then
-      recent_items[#recent_items + 1] = {id = r.id, label = label, detail = run_detail(r)}
+      if add(budget, stuck_items, rows) then shown[r.id] = true end
     end
   end
-  local notice = switch_notice(runs)
-  if notice then table.insert(nodes, 1, {id = 'switch', type = 'widget', text = notice}) end
-  if #stuck_items > 0 then nodes[#nodes + 1] = {id = 'stuck', type = 'list', label = 'Unfinished starts', items = stuck_items} end
-  if #recent_items > 0 then nodes[#nodes + 1] = {id = 'runs', type = 'list', label = 'Recent starts', items = recent_items} end
-  return {title = 'Templates', nodes = nodes}
+  local hidden_templates = 0
+  for _, t in ipairs(list) do
+    local item = {id = t.name, label = t.name, detail = count(#t.tabs, 'tab', 'tabs'),
+      action = {name = 'delete', label = 'Delete', enabled = true, tool = 'templates.delete'}}
+    if not add(budget, template_items, {item}) then hidden_templates = hidden_templates + 1 end
+  end
+  local others = 0
+  for _, r in ipairs(runs) do
+    if not stuck(r) and others < 10 then
+      others = others + 1
+      local item = {id = r.id, label = r.request.template.name .. ' in ' .. short(r.root), detail = run_detail(r)}
+      if add(budget, recent_items, {item}) then shown[r.id] = true end
+    end
+  end
+  local hidden_unfinished, hidden_finished = 0, 0
+  for _, r in ipairs(runs) do
+    if not shown[r.id] then
+      if finished(r) then hidden_finished = hidden_finished + 1 else hidden_unfinished = hidden_unfinished + 1 end
+    end
+  end
+  local display = {}
+  if notice then display[1] = notice end
+  display[#display + 1] = start
+  display[#display + 1] = save
+  display[#display + 1] = tlist
+  if hidden_templates > 0 then
+    more_templates.text = more_templates_text(hidden_templates)
+    display[#display + 1] = more_templates
+  end
+  if #stuck_items > 0 then display[#display + 1] = slist end
+  if #recent_items > 0 then display[#display + 1] = rlist end
+  if hidden_unfinished + hidden_finished > 0 then
+    more_runs.text = more_runs_text(hidden_unfinished, hidden_finished)
+    display[#display + 1] = more_runs
+  end
+  reply.tree.nodes = display
+  return checked(reply, 'Templates')
+end
+
+-- Start form. Budget priority: the template options (by name; the first one is the default value),
+-- the root default (a path), then the session options. The @new option is part of the skeleton.
+-- When no template option fits, the form is not shown: an agent can use templates.start.
+local function more_options_text(t, s)
+  local parts = {}
+  if t > 0 then parts[#parts + 1] = count(t, 'more template', 'more templates') end
+  if s > 0 then parts[#parts + 1] = count(s, 'more session', 'more sessions') end
+  return table.concat(parts, ' and ') .. ' are not in the lists: use templates.start.'
+end
+local function start_view(context, view_id)
+  local waiting = starting[view_id]
+  local nodes = {}
+  if waiting then nodes[1] = {id = 'starting', type = 'widget', text = 'Starting… The app goes to the new session when its first tab opens.'} end
+  local tree = {title = 'Start Session', nodes = nodes,
+    status = waiting and {state = 'working', msg = 'Starting'} or {state = 'blocked', kind = 'question', msg = 'Waiting for input'}}
+  local list = templates()
+  if #list == 0 then
+    nodes[#nodes + 1] = {id = 'empty', type = 'widget', text = 'No templates yet. Use Save as Template… in a session first.'}
+    nodes[#nodes + 1] = cancel_node()
+    return checked({tree = tree}, 'Start Session', true)
+  end
+  local options, sessions = {}, {{value = '@new', label = 'New session…'}}
+  local fields = {
+    {id = 'template', label = 'Template', kind = 'select', required = true, value = '', options = options},
+    {id = 'root', label = 'Root (the directory the panes are relative to)', kind = 'text', required = true, value = ''},
+    {id = 'session_id', label = 'Session', kind = 'select', required = true, value = '@new', options = sessions},
+    {id = 'session_name', label = 'New session name (default: the template name)', kind = 'text', value = ''},
+  }
+  local form = {id = 'start_session', type = 'form', fields = fields,
+    submit_action = {name = 'submit', label = 'Start session', enabled = not waiting, tool = 'templates.start'}}
+  local more = {id = 'more_options', type = 'widget', text = more_options_text(MAX_COUNT, MAX_COUNT)}
+  local first = #nodes + 1
+  nodes[first], nodes[first + 1], nodes[first + 2] = form, more, cancel_node()
+  local reply = {tree = tree}
+  local budget = {size = json_size(reply)}
+  if budget.size > VIEW_BUDGET then return too_large_view('Start Session', true) end
+  local hidden_templates, hidden_sessions = 0, 0
+  for _, t in ipairs(list) do
+    local option = {value = t.name, label = t.name .. ' · ' .. count(#t.tabs, 'tab', 'tabs')}
+    -- The first option is also the default value ('' in the skeleton: 2 bytes).
+    if add(budget, options, {option}, #options == 0 and json_size(t.name) - 2 or 0) then
+      if #options == 1 then fields[1].value = t.name end
+    else hidden_templates = hidden_templates + 1 end
+  end
+  if #options == 0 then
+    nodes[first], nodes[first + 1], nodes[first + 2] = {id = 'no_template', type = 'widget',
+      text = 'The template list is too large for this form. Use templates.start.'}, cancel_node(), nil
+    return checked({tree = tree}, 'Start Session', true)
+  end
+  local root = source_dir(context)
+  if root and budget.size + json_size(root) - 2 <= VIEW_BUDGET then
+    fields[2].value = root
+    budget.size = budget.size + json_size(root) - 2
+  end
+  for _, s in ipairs(hub('hub.session.list').sessions or {}) do
+    local option = {value = s.session_id, label = (s.label or '') ~= '' and s.label or s.session_id}
+    if not add(budget, sessions, {option}) then hidden_sessions = hidden_sessions + 1 end
+  end
+  if hidden_templates + hidden_sessions > 0 then
+    more.text = more_options_text(hidden_templates, hidden_sessions)
+  else
+    table.remove(nodes, first + 1)
+  end
+  return checked(reply, 'Start Session', true)
 end
 
 local function render(args)
-  if args.route == '/panels/templates' then return {tree = render_panel()} end
+  if args.route == '/panels/templates' then return render_panel() end
   local context = context_of(args)
+  if args.route == '/forms/start' then return start_view(context, args.view_id) end
   local tree
   if args.route == '/forms/save' then
     local cap = capture(context.session_id)
@@ -822,24 +958,6 @@ local function render(args)
     end
     nodes[#nodes + 1] = cancel_node()
     tree = {title = 'Save as Template', nodes = nodes}
-  elseif args.route == '/forms/start' then
-    local list = templates()
-    local nodes = {}
-    if #list == 0 then
-      nodes[1] = {id = 'empty', type = 'widget', text = 'No templates yet. Use Save as Template… in a session first.'}
-    else
-      nodes[1] = {id = 'start_session', type = 'form', fields = start_fields(context, list),
-        submit_action = {name = 'submit', label = 'Start session', enabled = not starting[args.view_id], tool = 'templates.start'}}
-    end
-    if starting[args.view_id] then
-      table.insert(nodes, 1, {id = 'starting', type = 'widget', text = 'Starting… The app goes to the new session when its first tab opens.'})
-    end
-    nodes[#nodes + 1] = cancel_node()
-    tree = {title = 'Start Session', nodes = nodes}
-    if starting[args.view_id] then
-      tree.status = {state = 'working', msg = 'Starting'}
-      return {tree = tree}
-    end
   else
     fail('invalid_input', 'Unknown route')
   end
@@ -944,7 +1062,6 @@ end
 -- beyond 2^53. before is a canonical ID (no leading zero); the page holds runs older than it.
 local RUNS_BUDGET, RUNS_LIMIT, RUNS_MAX = 40 * 1024, 50, 100
 local function older(a, b) return #a < #b or #a == #b and a < b end
-local function json_size(v) return #rex.json.encode(v) end
 local function run_page(before, limit)
   if limit == nil then limit = RUNS_LIMIT end
   if type(limit) ~= 'number' or limit % 1 ~= 0 or limit < 1 or limit > RUNS_MAX then
