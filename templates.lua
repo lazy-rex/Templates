@@ -50,11 +50,19 @@ local here = debug.getinfo(1, 'S').source:gsub('^@', '')
 local run_module = dofile(assert(here:match('^(/.*)/[^/]*$'), 'the plugin path must be absolute') .. '/templates_run.lua')
 
 -- Directories. Both return canonical absolute paths (symlinks resolved) of existing directories.
+-- dir_memo: during one Save form render (with_dir_memo), real_dir and git_root check each path
+-- once. Many panes share a directory, and each check starts processes. The maps are set only
+-- for that render and are cleared on every exit, so each render checks again. They are table
+-- fields (LazyRex docs/rex-protocol.md, "Rex Lua runtime"). A module-level request scope relies on
+-- the plugin running handlers one at a time (same section); it is not safe under concurrent handlers.
+local dir_memo = {real = nil, git = nil}
 local function real_dir(path)
+  if dir_memo.real and dir_memo.real[path] then return dir_memo.real[path] end
   local r = run({'realpath', path})
   if not r.ok then fail('invalid_input', path .. ' does not exist') end
   local out = line(r.stdout)
   if not run({'test', '-d', out}).ok then fail('invalid_input', path .. ' is not a directory') end
+  if dir_memo.real then dir_memo.real[path] = out end
   return out
 end
 local function resolve_root(path)
@@ -68,8 +76,20 @@ local function resolve_dir(root, rel)
   return dir
 end
 local function git_root(dir)
+  if dir_memo.git and dir_memo.git[dir] ~= nil then return dir_memo.git[dir] or nil end
   local r = run({'git', '-C', dir, 'rev-parse', '--show-toplevel'})
-  if r.ok then return real_dir(line(r.stdout)) end
+  local root = r.ok and real_dir(line(r.stdout)) or nil
+  if dir_memo.git then dir_memo.git[dir] = root or false end
+  return root
+end
+-- with_dir_memo runs f(...) with fresh memo maps and clears them on every exit. An error is
+-- raised again unchanged (a structured error stays a table).
+local function with_dir_memo(f, ...)
+  dir_memo.real, dir_memo.git = {}, {}
+  local result = {pcall(f, ...)}
+  dir_memo.real, dir_memo.git = nil, nil
+  if not result[1] then error(result[2], 0) end
+  return unpack(result, 2, table.maxn(result))
 end
 -- The common root: the git root when every directory is in one repository, else the deepest
 -- common parent.
@@ -1119,6 +1139,23 @@ local function delete_view(hx, rev)
   return checked({tree = {title = 'Delete Template', nodes = nodes, status = WAITING}}, 'Delete Template', true)
 end
 
+-- save_tree is the Save form: a fresh capture of the source session at each render.
+local function save_tree(context)
+  local cap = capture(context.session_id)
+  local nodes = {}
+  if #cap.order == 0 then
+    nodes[1] = {id = 'empty', type = 'widget', text = 'This session has no panes to save.'}
+  else
+    nodes[1] = {id = 'save_template', type = 'form', fields = save_fields(cap, session_label(context.session_id)),
+      submit_action = {name = 'submit', label = 'Save template', enabled = true, tool = 'templates.save'}}
+    local help = 'A pane started from a profile keeps its profile and args. Other panes start as a shell unless you choose a profile.'
+    if cap.dropped > 0 then help = help .. ' ' .. cap.dropped .. ' floating pane(s) are left out.' end
+    nodes[2] = {id = 'save_help', type = 'widget', text = help}
+  end
+  nodes[#nodes + 1] = cancel_node()
+  return {title = 'Save as Template', nodes = nodes}
+end
+
 local function render(args)
   if args.route == '/panels/templates' then return render_panel() end
   local context = context_of(args)
@@ -1128,19 +1165,7 @@ local function render(args)
   if args.route:sub(1, 14) == '/forms/delete/' then return delete_view(delete_route(args.route)) end
   local tree
   if args.route == '/forms/save' then
-    local cap = capture(context.session_id)
-    local nodes = {}
-    if #cap.order == 0 then
-      nodes[1] = {id = 'empty', type = 'widget', text = 'This session has no panes to save.'}
-    else
-      nodes[1] = {id = 'save_template', type = 'form', fields = save_fields(cap, session_label(context.session_id)),
-        submit_action = {name = 'submit', label = 'Save template', enabled = true, tool = 'templates.save'}}
-      local help = 'A pane started from a profile keeps its profile and args. Other panes start as a shell unless you choose a profile.'
-      if cap.dropped > 0 then help = help .. ' ' .. cap.dropped .. ' floating pane(s) are left out.' end
-      nodes[2] = {id = 'save_help', type = 'widget', text = help}
-    end
-    nodes[#nodes + 1] = cancel_node()
-    tree = {title = 'Save as Template', nodes = nodes}
+    tree = with_dir_memo(save_tree, context)
   else
     fail('invalid_input', 'Unknown route')
   end

@@ -224,6 +224,24 @@ template. Code: `templates.lua`, `menu_view`, `delete_view`, `delete_ui`. Tests:
   keypress in the renderer (untested).
 - The agent tool `templates.delete` does not change: it deletes by name, with no confirmation.
 
+## Save form renders
+
+The hub renders every open view of the plugin again after each store commit, each
+`hub.ui.invalidate` and each worker change (hub `docs/hub.md`, "Snapshots and invalidation"). A
+start makes many of these, so an open Save form renders many times. Each render captures the
+source session again: per pane `hub.spawn.spec`, `terminal.process` and `terminal.pwd`, then
+`realpath` and `test -d`, and `git rev-parse` for the common root.
+
+- **Request-local dedup.** During one Save form render (`with_dir_memo`), `real_dir` and `git_root`
+  check each path once. A failure is not kept. The maps are cleared on every exit, also on an
+  error, so each render, `templates.capture` and the submit check again. The scope relies on the
+  plugin running its handlers one at a time (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime");
+  it is not safe under concurrent handlers. Tests: `tests/save_dedup.lua`.
+- **Measured** (lab, Rex 1203 `0.0.1792158932-g88fd41`, hub 6c48bf7): a session of 6 idle shells
+  in 3 tabs, in 3 directories of one git repository. One Save render launched 30 processes before
+  and 9 after. This count belongs to that fixture: a git root outside the captured directories
+  adds work. The start latency results are in the commit review, not here.
+- No cache survives a render: the form never shows an older capture than its last render.
 ## Size bounds
 
 One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The
