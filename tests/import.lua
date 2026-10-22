@@ -128,3 +128,97 @@ test('a failed import commit and a lost import commit reply: a restart continues
   imported()
   for _, key in ipairs({AMP, MIX, 'template/zz', 'template/'}) do same(key) end
 end)
+
+-- The largest row: a store record is at most one 64 KiB control message as JSON, and a '"' doubles
+-- as a parameter (2 bytes in the record, 4 in the request), the largest growth. So such a record
+-- needs the most chunks: 3 of 60 KiB. They commit in one transaction, within the hub's 10 s.
+test('the largest record imports in three chunks in one transaction', function()
+  local key = 'template/' .. W.hex('imp-max')
+  write({{key = key, value = tpl('imp-max', string.rep('"', 31000))}})
+  expect(#rex.json.encode(store(key).value) > 62000).to_be(true)
+  reset(false)
+  local _, base = calls('none')
+  restart()
+  imported()
+  same(key)
+  local appends = 0
+  for _, c in ipairs(calls('hub.sql.exec', {after = base.next})) do
+    local p = c.args.params
+    if c.args.sql:match('^UPDATE templates SET value = value || %?') and p[2] == W.hex('imp-max') then appends = appends + 1 end
+  end
+  expect(appends).to_be(2)
+  write({{key = key, delete = true}})
+end)
+
+-- A row whose key alone is over the request budget is refused (too_large). The import stops at it,
+-- with no cursor past it and no 'import' mark, so the plugin does not serve; the hub starts it
+-- again, and the import tries again from its cursor. Without the record, the import completes.
+test('a key over the request budget stops the import without moving its cursor past it', function()
+  local bad = 'template/' .. string.rep('f', 63000)
+  write({{key = bad, value = tpl('bad', 't')}})
+  reset(false)
+  local _, base = calls('none')
+  restart()
+  -- Two import attempts: the scan of template/ runs once in each.
+  wait('a second import attempt', function()
+    local n = 0
+    for _, c in ipairs(calls('hub.store.scan', {after = base.next})) do if c.args.prefix == 'template/' then n = n + 1 end end
+    return n >= 2 or nil
+  end, 60)
+  expect(sql("SELECT v FROM meta WHERE k = 'import'")[1]).to_be(nil)
+  local cursor = sql("SELECT v FROM meta WHERE k = 'import/template'")[1]
+  expect(cursor == nil or cursor.v < bad).to_be(true)
+  expect(row(bad)).to_be(nil)
+  write({{key = bad, delete = true}})
+  imported()
+  same(AMP)
+end)
+
+-- A call while the import runs (it runs in the SDK's registration callback, and Rex Lua runs one
+-- handler at a time): the call waits until the import ends. 6000 records take longer than the
+-- hub's 10 s for a forwarded call (hub agentface.go, timeout_ms), so the call times out; a retry
+-- with the same key answers as one save.
+test('a call during the import waits for it; a call that timed out answers on its retry', function()
+  local alice = agent('alice')
+  local s, root = W.workspace()
+  W.capture(alice, s)
+  local ops = {}
+  for i = 1, 6000 do
+    ops[#ops + 1] = {key = 'template/' .. W.hex(string.format('q-%05d', i)), value = tpl('q', 't')}
+    if #ops == 300 then write(ops); ops = {} end
+  end
+  reset(false)
+  local _, base = calls('none')
+  local old = H.hub('hub.test.status', {}).plugins.templates.instance_id
+  restart()
+  -- The new instance is registered (the import runs after the registration), and the import runs.
+  wait('the new instance', function()
+    local p = H.hub('hub.test.status', {}).plugins.templates
+    return p.registered and p.instance_id ~= old or nil
+  end, 30)
+  local before = sql("SELECT v FROM meta WHERE k = 'import'")[1]
+  expect(before).to_be(nil)
+  local args = {name = 'q-save', root = root, session_id = s, key = 'q-save'}
+  local ok, err = pcall(alice.call, alice, 'templates.save', args)
+  expect(ok).to_be(false)
+  imported()
+  -- The plugin served no agent call before the import's last write.
+  local done_seq, identify_seq
+  for _, c in ipairs(calls('', {after = base.next})) do
+    local p = c.args and c.args.params
+    if c.action == 'hub.sql.exec' and type(p) == 'table' and p[1] == 'import' and p[2] == 'done' then done_seq = c.seq end
+    if c.action == 'hub.identify' and not identify_seq then identify_seq = c.seq end
+  end
+  expect(done_seq ~= nil).to_be(true)
+  expect(identify_seq == nil or identify_seq > done_seq).to_be(true)
+  expect(tostring(err and (err.message or err))).to_match('timed out')
+  -- Rex can still deliver the timed-out call after the import (observed in one lab run on Rex
+  -- 0.0.1792158932-g88fd41, LazyRex hub/sql-lab f413b36; another run did not show it by the time of
+  -- this read). Either way the retry answers as one save: it replays a save that ran, or saves.
+  local rev = W.trow('template/' .. W.hex('q-save')).rev
+  expect(alice:call('templates.save', args)).to_equal({name = 'q-save'})
+  local after = W.trow('template/' .. W.hex('q-save')).rev
+  expect(after ~= nil).to_be(true)
+  if rev then expect(after).to_be(rev) end
+  expect(#sql('SELECT key FROM ops WHERE key LIKE ?', {'save/agent/%q-save'})).to_be(1)
+end)
