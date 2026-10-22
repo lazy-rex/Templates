@@ -147,8 +147,8 @@ test('a completed Start form after its run was retired: the hub answers; Templat
 end)
 
 -- A Start form into a new session stays open until its switch decision (switch_app). Retention
--- waits for that decision (switch_settled, templates_run.lua): else the form's next poll found a
--- retired run and failed, although its session opened (Codex's review of the retention commit).
+-- waits for that decision (switch_settled, templates_run.lua): else the form's next poll would find a
+-- retired run and fail, although its session opened.
 local function session_count() return #rex.call('session.list', {}).sessions end
 -- start_form opens the Start form of a new template, for a new session.
 local function start_form(a)
@@ -178,8 +178,8 @@ local function sentinel()
 end
 
 -- The engine counted the 200 newer runs (the sentinel is retired) before the submit, so the run is
--- the oldest over 200 when it opens. Before the fix the step retired it at once, and a poll of the
--- form (every 500 ms) after that failed: a race that the old code lost in most runs.
+-- the oldest over 200 when it opens. If the step retired it at once, the next poll of
+-- the form (every 500 ms) would fail with expired.
 test('a run is not retired while its Start form waits for the switch: the form switches once, then the run is retired', function()
   local alice = agent('alice')
   local c = start_form(alice)
@@ -205,10 +205,10 @@ test('a run is not retired while its Start form waits for the switch: the form s
   a:close()
 end)
 
--- The same with one shell tab (Codex's probe): the first tab opens as the run finishes, so the run
+-- The same with one shell tab: the first tab opens as the run finishes, so the run
 -- is eligible when the switch can happen. The test holds the run's first update while it writes
--- the 200 newer runs, then releases it. Before the fix the step retired the run before the form's
--- next poll, and that poll failed with expired.
+-- the 200 newer runs, then releases it. If the step retired the run before the form's
+-- next poll, that poll would fail with expired.
 test('one tab: a run is not retired before its Start form\'s switch; the form succeeds with one session', function()
   local alice = agent('alice')
   local s, root = W.workspace()

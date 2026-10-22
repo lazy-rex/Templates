@@ -1,4 +1,4 @@
--- The start records in SQL (templates_sql.lua; docs/sdk-port.md, "Stage 2", slice 2). Admission
+-- The start records in SQL (templates_sql.lua; tests/templates-run.md, "Contract"). Admission
 -- writes the start form, the run key, the counter and the run in one transaction; dismiss writes
 -- the run and its operation in one transaction. A lost commit reply (the commit happened) replays;
 -- a refused commit leaves nothing.

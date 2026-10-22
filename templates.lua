@@ -1,12 +1,14 @@
--- Session templates (the maintainer, 2026-10-17). A template is a named group of tabs. Each pane has a
+-- Session templates (decision "LazyRex session templates preserve relative layouts and explicit
+-- launch specifications"). A template is a named group of tabs. Each pane has a
 -- launch (a profile and its args, or a plain shell), a directory relative to a root, and its place
 -- in the tab's layout. "Save as Template…" captures a session; "Start Session…" starts a template
 -- in any root. The engine (templates_run.lua) owns durable starts; this file owns capture, the
 -- forms, the panel and the adapter to hub.spawn_window.
 -- The Plugin SDK (LazyRex sdk/lua) registers the plugin and dispatches the hub calls. Each action
 -- and view has {tx = false, store = false}: the SDK opens no transaction around a handler and saves
--- no reply. The data is in SQL (templates_sql.lua; docs/sdk-port.md, stage 2): each step opens its
--- own short transactions, and Templates keeps its own operation replies (ops, start_forms).
+-- no reply. The data is in SQL (templates_sql.lua; tests/templates-run.md, "Storage"): each step
+-- opens its own short transactions, and Templates keeps its own operation replies (ops,
+-- start_forms).
 local app = require('lazyrex').plugin('templates')
 local function fail(code, message) error({code = code, message = message}) end
 local function text(value, name)
@@ -582,7 +584,7 @@ local function agent_save(caller, args)
     end
   end
   -- replace: a canonical nonzero revision from templates.get, kept as text. An omitted replace
-  -- leaves the fingerprint as it was before replace existed.
+  -- is not in the fingerprint.
   if args.replace ~= nil and (type(args.replace) ~= 'string' or #args.replace > 20 or not args.replace:match('^[1-9]%d*$')) then
     fail('invalid_input', 'replace is the rev that templates.get gives (a decimal number without leading zeros, not 0)')
   end
@@ -710,7 +712,7 @@ local function source_dir(context)
   if not cwd then return nil end
   return git_root(cwd) or cwd
 end
--- A start into a new session switches the app to it (the maintainer, 2026-10-19; coordinator's rules).
+-- A start into a new session switches the app to it.
 -- The form stays open ({status = 'running'}: the hub calls the action again about every 0.5 s)
 -- until the first tab opens, the start stops, or SWITCH_WAIT seconds pass. Then the plugin asks
 -- hub.app.select_session from the still-open form; the hub refuses when the user left the form.
@@ -744,7 +746,7 @@ local function switch_app(view_id, start_key, run_id, at)
     return value
   end
   -- Expiry comes first: a recovered start never switches late, even when its first tab is open
-  -- now (Codex's review).
+  -- now.
   if os.time() - at >= SWITCH_WAIT then
     return first({state = 'refused', code = 'timeout', message = 'The automatic-switch wait (' .. SWITCH_WAIT .. ' s) expired'})
   end

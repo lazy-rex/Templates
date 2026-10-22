@@ -119,9 +119,10 @@ test('agent: a replay answers first; other args give operation_conflict; a lost 
   expect(titles(W.template(W.hex('rp-replay')).value)).to_equal({'recreated'})
 end)
 
--- Operations saved before replace existed keep their fingerprints: a replay answers before the
--- capture, so a source session or root that no longer works does not matter.
-test('a save operation saved before replace existed replays unchanged (agent and form)', function()
+-- A save without replace has no replace in its fingerprint: a saved operation of that
+-- fingerprint replays. The replay answers before the capture, so a source session or root that no
+-- longer works does not matter.
+test('a save operation without replace replays unchanged (agent and form)', function()
   local alice = agent('alice')
   -- Agent: save-agent-v1/ + canon{name, panes, root, session_id}, without replace.
   W.put_op({key = 'save/agent/' .. part('alice') .. part('rp-old-agent'),

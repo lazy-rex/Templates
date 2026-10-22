@@ -424,7 +424,7 @@ function tests.wake_one_schedules_only_a_queued_run()
   assert(#f.calls == calls, 'a blocked run was dispatched again')
 end
 function tests.dismissed_run_revokes_a_grant_that_it_did_not_record()
-  -- The reviewer's case: the grant committed in the hub, the run was dismissed before it saved
+  -- The grant committed in the hub, the run was dismissed before it saved
   -- the grant ID. A new engine finds the grant, records it and revokes it; nothing dispatches.
   local f=fixture(); local e=f.engine(); local run=e.admit(agent_request())
   e.dismiss(run.id)
@@ -443,7 +443,7 @@ function tests.finished_run_without_a_grant_checks_once_per_engine()
   assert(f.lookups == lookups + 1, 'a new engine looks again')
 end
 function tests.late_grant_is_found_after_restart()
-  -- The reviewer's case: the grant commits after the first lookup (a start call still ran).
+  -- The grant commits after the first lookup (a start call still ran).
   local f=fixture(); local e=f.engine(); local run=e.admit(agent_request())
   e.dismiss(run.id); drain(e)
   f.grant='grant:late'
@@ -615,11 +615,11 @@ function tests.rex_json_encodes_angle_brackets_and_line_separators_as_6_bytes()
   -- A malformed byte becomes U+FFFD, written as its 3 UTF-8 bytes (not escaped).
   assert(size(string.char(0xFF)) == 5, 'a malformed byte: ' .. size(string.char(0xFF)))
 end
--- A run admitted before this bound, larger than it now allows, keeps its replay: the same request
--- with its key returns the run, and another request with that key conflicts (no size check first).
-function tests.a_run_over_the_new_bound_replays_its_key()
+-- A replay checks no size: a run over the bound keeps its replay. The same request with its key
+-- returns the run, and another request with that key conflicts.
+function tests.a_run_over_the_bound_replays_its_key()
   local f = fixture()
-  -- About 63 KB: over the new bound, under the 64 KiB write limit (as an old admission could be).
+  -- About 63 KB: over the bound, under the 64 KiB write limit.
   local r = sized('&', 5250); r.key = 'old-start'
   local run = {id='7', request=copy(r), root='/root', tabs={{title='One', key='templates/7/tab/1',
     layout={profile='test', args={port=string.rep('&', 5250)}, cwd='/root'}}}, next_tab=1, status='blocked',

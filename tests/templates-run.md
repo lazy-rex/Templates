@@ -248,16 +248,15 @@ replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
   read and the write, so the form has no revision guard. A missing field (a form of an older
   plugin) means `keep`; another value is `invalid_input`.
 - **Unchanged.** The operation and the template commit in one transaction. A replay answers before the
-  capture and every check. An omitted `replace` leaves the agent fingerprint as before, and a form
-  without the field keeps its fingerprint. The save size check runs before the write: a refused
+  capture and every check. An omitted `replace` is not in the agent or the form fingerprint. The save size check runs before the write: a refused
   replacement leaves the old template and its rev. `saved_by` is the new saver.
 - **Other features.** A delete confirmation of the old revision gets `conflict` and then shows no
   submit ("Panel delete"). A start that is running keeps its frozen template.
 
 ## Save form renders
 
-The hub renders every open view of the plugin again after each store commit, each SQL commit
-that writes a table, each `hub.ui.invalidate` and each worker change (hub `docs/hub.md`, "Snapshots
+The hub renders every open view of the plugin again after each SQL commit that writes a table,
+each `hub.ui.invalidate` and each worker change (hub `docs/hub.md`, "Snapshots
 and invalidation"; for SQL commits: the source of LazyRex f413b36, `sqlsvc.go` calls `kickViews`
 after a commit with table marks). A
 start makes many of these, so an open Save form renders many times. Each render captures the
@@ -270,9 +269,9 @@ source session again: per pane `hub.spawn.spec`, `terminal.process` and `termina
   plugin running its handlers one at a time (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime");
   it is not safe under concurrent handlers. Tests: `tests/save_dedup.lua`.
 - **Measured** (lab, Rex 1203 `0.0.1792158932-g88fd41`, hub 6c48bf7): a session of 6 idle shells
-  in 3 tabs, in 3 directories of one git repository. One Save render launched 30 processes before
-  and 9 after. This count belongs to that fixture: a git root outside the captured directories
-  adds work. The start latency results are in the commit review, not here.
+  in 3 tabs, in 3 directories of one git repository. One Save render launches 9 processes (30
+  without the dedup). This count belongs to that fixture: a git root outside the captured directories
+  adds work.
 - No cache survives a render: the form never shows an older capture than its last render.
 ## Start form wait
 
@@ -321,6 +320,47 @@ characters, so `requested_title` adds at most about 400 bytes of JSON to a pane 
 escaped character).
 
 Tests: `tests/titles.lua` (observed on Rex 0.0.1792158932-g88fd41 with LazyRex 03ef95f).
+
+## Storage
+
+Templates keeps every record in its SQL database (`templates_sql.lua`; LazyRex `docs/sql.md`) and
+makes no `hub.store` call (`tests/sdk.lua` checks the complete call record). The tables:
+
+- `meta`: the revision counter (`rev`) and the run counter (`run-counter`).
+- `templates (hex, rev, value)`: `hex` is the hex of the name, `value` the template as JSON.
+- `ops (key, fingerprint, result)`: the saved replies of save, delete, dismiss and retry.
+- `runs`, `run_keys`, `start_forms`, `switches`: the start records ("Contract", "Retention").
+
+Revisions. `next_rev` gives each new revision of `meta` `rev` once; the first write on a new
+database gets 1 (`tests/fresh.lua`). A revision guard stays only where a revision is held outside
+one transaction (decision "lazyrex Templates SQL transactions replace local conflict retries while
+justified revision guards remain"):
+
+- `templates.rev`: `templates.save` with `replace` (the agent holds the rev that `templates.get`
+  gave), and the Delete confirmation route (`/forms/delete/<hex>/<rev>`).
+- `runs.ver`: an engine step that calls the hub between its read and its write.
+- `start_forms.rev`: a retention marker's `form_rev` names the form of its retired run.
+
+Operation replay. Each write handler runs its replay check, its reads and its writes in one short
+transaction. The `ops` key is `<kind>/<part(key)>`, or `<kind>/agent/<part(id)><part(key)>` for
+each ID of an agent, so one key can name one operation of each kind. The fingerprints:
+
+- UI save: `save-v2/` + the source session ID + the submitted values in key order.
+- Agent save: `save-agent-v1/` + the canonical arguments (`canon`).
+- Delete confirmation: `delete-ui-v1/` + hex + rev. Dismiss and retry: the kind + the run ID.
+
+An optional field that is absent (for example `replace`) is not in the text of a save fingerprint.
+
+A saved reply replays without a time limit, and no `ops` row expires (decision "lazyrex release 4
+keeps private operation tables until SDK replay covers their guarantees"). Starts do not use `ops`:
+a start replays from its run key and its start form, because a `running` reply is never saved
+(decision "lazyrex Templates keeps start_forms because running replies never save the frozen start
+request").
+
+Reads. A read of many rows uses `app.db.each`: `app.db.query` gives `too_large` for a result over
+one reply. `templates.list` reads at most LIST_MAX + 1 summaries in each query; the engine reads
+its runs and the expired markers in pages of SCAN_LIMIT (`tests/list.lua`, `tests/scan.lua`). A
+render makes no write.
 
 ## Size bounds
 
@@ -411,12 +451,42 @@ same refusal unless the resolved directories changed in the meantime.
 Records that exist already, or a template written by another writer, are not checked at save;
 admission still applies. Tests: `tests/save_size.lua` and the measure cases in `tests/engine.lua`.
 
+## Render inputs
+
+The hub renders a view again after an SQL commit when the view read a table that the commit
+changed, or after every commit when it cannot know what the render read (LazyRex `docs/hub.md`,
+"SQL read tracking"). The hub sees only the hub calls of a render. It cannot see Rex calls, Lua
+state, environment variables, files, subprocesses or the clock. This list gives the inputs of each
+view outside SQL (read in source):
+
+- Panel (`/panels/templates`): templates, runs, run counts and switches from SQL. Outside SQL:
+  `HOME` only (`short`), which does not change while the plugin runs.
+- Template menu (`/forms/template/<hex>`) and Delete confirmation (`/forms/delete/<hex>/<rev>`):
+  the template row from SQL only.
+- Start form (`/forms/start`, `start_view`):
+  - Always: the Lua table `starting[view_id]` (the "Starting…" state). Each change of `starting`
+    calls `hub.ui.invalidate` (set in `start_poll`; cleared after a definite error in
+    `start_session`), or closes the form (cleared before the `done` result).
+  - The early paths return before any other input: a named template that is missing or has an
+    unusable name, an empty template list, the fixed tree over the budget (`too_large_view`), a
+    selected template option that does not fit, and no usable template option. They read SQL and
+    `starting` only.
+  - The normal path also reads the source pane (`source_dir`: Rex `terminal.process` and
+    `terminal.pwd` through `pane_dir`, the file system through `realpath` and `test -d`, and the
+    git root through a `git` subprocess) and calls `hub.session.list`.
+- Save form (`/forms/save`, `save_tree`): reads no table.
+  - `capture`: Rex `session.attach`, `session.view`, `session.list_blocks` and
+    `terminal.process`; `hub.spawn.spec` for each kept pane; `pane_dir` (Rex `terminal.pwd`, the
+    file system); `is_shell` (`SHELL`).
+  - With panes, `save_fields`: `hub.profiles` (caught with `pcall`), `common_root` (git and the
+    file system) and `short` (`HOME`); and `session_label` (`hub.session.list`).
+
 ## Verification
 
 `lazyrex-hub test` runs the controlled tests in `tests/engine.lua` (the cases are in
 `tests/support/engine_cases.lua`), and the real-hub tests in the other `tests/*.lua` files.
 
-The sixteen original controlled tests cover admission without a side effect, copied inputs,
+The controlled tests cover admission without a side effect, copied inputs,
 same-key replay after directory removal, changed-key content, lost admission and
 progress replies, no dispatch before commit, plugin restart after a lost spawn
 reply, pending ordering, partial failure and closure, session uncertainty, and

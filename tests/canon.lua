@@ -14,9 +14,9 @@ local function join(list)
   return table.concat(blocks)
 end
 
--- The reviewer's probe (concat audit): 2600 pane choices. Before the fix, the save failed with
--- registry overflow before its replay. The fingerprint is computed here by the canon rules, so the
--- replay of the saved operation proves the exact bytes.
+-- 2600 pane choices: canon joins more than 2559 items in one table.concat in the plugin. The
+-- fingerprint is computed here by the canon rules, so the replay of the saved operation proves the
+-- exact bytes.
 test('a save with 2600 pane choices replays an operation saved with the same canonical text', function()
   local alice = agent('alice')
   local panes, ids = {}, {}

@@ -61,7 +61,7 @@ test('lab 1 a pane left undecided is refused; Leave out removes the pane and its
 end)
 
 -- A default pane runs the shell through login: the child (login) has no cwd, the foreground shell
--- has it. Without terminal.pwd, the directory comes from the foreground (the reviewer's probe).
+-- has it. Without terminal.pwd, the directory comes from the foreground.
 -- The child is not a shell, so the pane has no launch guess: the user chooses Shell.
 test('a login pane has the directory of its foreground shell and no launch guess', function()
   local alice = agent('alice')

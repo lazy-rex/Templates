@@ -23,8 +23,7 @@ local function waiting(name, op_key)
   return form, key, hold, W.run(id).value.request.key
 end
 
--- The reviewer's probe (item 8 review): a definite error ends the operation, and the form no
--- longer shows "Starting…". Before the fix, the widget stayed after the failure.
+-- A definite error ends the operation, and the form does not show "Starting…" any more.
 test('a poll that fails with a definite error clears Starting', function()
   local a = app('starting-definite', {sessions = {}})
   local form, key, hold, switch = waiting('st-definite', 'st-definite')

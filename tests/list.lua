@@ -266,9 +266,9 @@ test('an empty name is listed first and round-trips as a cursor', function()
 end)
 
 -- Names that JSON does not keep: the encoder replaces an invalid UTF-8 byte with U+FFFD, so such a
--- name as a cursor would sort before its key, and the list would repeat (the reviewer's probe:
--- template/ff and template/ffff). Such a key blocks the list. Valid multibyte names are cursors.
--- This test runs last: the keys template/ff... sort after every other name.
+-- name as a cursor would sort before its key, and the list would repeat (for example
+-- the rows with hex ff and ffff). Such a row blocks the list. Valid multibyte names are cursors.
+-- This test runs last: the hex ff... sorts after every other name.
 test('a name that is not valid UTF-8 blocks the list; a valid multibyte name round-trips', function()
   local a = agent('alice')
   local e1, e2, e3 = '\195\169-1', '\195\169-2\255', '\195\169-3' -- "é-1", "é-2" and the byte ff, "é-3"
@@ -287,7 +287,7 @@ test('a name that is not valid UTF-8 blocks the list; a valid multibyte name rou
   page = a:call('templates.list', {after = '\195\169', limit = 1})
   expect(page.next_after).to_be(e1)
   expect(a:call('templates.list', {after = page.next_after, limit = 1}).templates[1].name).to_be(e3)
-  -- The probe: template/ff and template/ffff after the last valid name.
+  -- The rows with hex ff and ffff sort after the last valid name.
   W.put_template('ff', {name = 'foreign', tabs = {}, saved_by = 'user'})
   W.put_template('ffff', {name = 'foreign', tabs = {}, saved_by = 'user'})
   page = a:call('templates.list', {after = '\195\169', limit = 5})
@@ -298,8 +298,8 @@ test('a name that is not valid UTF-8 blocks the list; a valid multibyte name rou
   W.delete_template('ffff')
 end)
 
--- The reviewer's probe (773cd80 review): the summary keeps the JSON type of saved_by, as the store
--- list gave it (an object, an array, a boolean, null, a string or a number).
+-- The summary keeps the JSON type of saved_by, as the row holds it (an object, an array, a
+-- boolean, null, a string or a number).
 test('templates.list keeps the JSON type of saved_by', function()
   local a = agent('alice')
   local cases = {{'sb-1', {source = 'foreign'}}, {'sb-2', {'x', 2}}, {'sb-3', true}, {'sb-4', false}, {'sb-5', 'alice'}, {'sb-6', 7}}

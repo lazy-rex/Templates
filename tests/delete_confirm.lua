@@ -35,13 +35,13 @@ local function open_confirm(s, hx, key)
 end
 local function submit(confirm, key) return confirm:action('confirm', 'submit', {values = {}}, key) end
 
-test('the panel row no longer deletes: the old delete action is refused; the row opens the menu', function()
+test('the panel row does not delete: a delete action of the row is refused; the row opens the menu', function()
   local s = W.workspace()
   put('pd-old', tpl('pd-old'))
   local hx = W.hex('pd-old')
   local p = W.panel(s)
   local tree0 = p:render()
-  -- The defect: before the fix, this one action (one Enter on the row) deleted the template.
+  -- One action (one Enter on the row) must not delete the template.
   local old = p:action('templates', 'delete', {item_id = 'pd-old'}, 'pd-old-delete')
   expect(W.template(hx).value).not_to_be(nil)
   expect(old.status).to_be('failed')

@@ -134,7 +134,7 @@ test('a key of 200 "<" still starts and replays', function()
   W.wait_run(a, first.run_id, 'open')
 end)
 
--- The reviewer's case: the hub's refusal repeats an 18 000-byte profile name. The run stores a
+-- The hub's refusal repeats an 18 000-byte profile name. The run stores a
 -- bounded error, so it stays writable and ends blocked (it can be dismissed).
 test('a long refusal from the hub is stored bounded; the run blocks and can be dismissed', function()
   local a = agent('alice')
@@ -153,7 +153,7 @@ test('keys are bounded: a key over 200 bytes is refused before anything is writt
   expect_error(function() a:call('templates.dismiss', {run_id = '1', key = string.rep('k', 201)}) end, 'invalid_input')
 end)
 
--- The reviewer's case: a session ID in the request is repeated in each tab request. An ID outside
+-- A session ID in the request is repeated in each tab request. An ID outside
 -- the bound is refused before anything is written.
 test('an oversized input session ID is refused before the start is written', function()
   local a = agent('alice')

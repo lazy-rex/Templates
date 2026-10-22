@@ -186,7 +186,7 @@ test('only the hub calls the views and forwards; an agent may call an export dir
   expect(type(alice:direct('templates.list', {}).templates)).to_be('table')
 end)
 
--- The reviewer's cases (2da0f11 review). A template that alice saved, started into a session that
+-- A template that alice saved, started into a session that
 -- does not exist, so its first tab blocks.
 local function seed_blocked()
   W.put_template('726576696577', {v = 1, name = 'review', saved_by = 'alice',
