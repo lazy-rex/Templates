@@ -296,3 +296,24 @@ test('a name that is not valid UTF-8 blocks the list; a valid multibyte name rou
   expect_error(function() a:call('templates.list', {after = e3, limit = 1}) end, 'too_large')
   W.twrite({{key = 'template/ff', delete = true}, {key = 'template/ffff', delete = true}})
 end)
+
+-- The reviewer's probe (773cd80 review): the summary keeps the JSON type of saved_by, as the store
+-- list gave it (an object, an array, a boolean, null, a string or a number).
+test('templates.list keeps the JSON type of saved_by', function()
+  local a = agent('alice')
+  local cases = {{'sb-1', {source = 'foreign'}}, {'sb-2', {'x', 2}}, {'sb-3', true}, {'sb-4', false}, {'sb-5', 'alice'}, {'sb-6', 7}}
+  for _, c in ipairs(cases) do
+    local t = tpl(c[1], 1)
+    t.saved_by = c[2]
+    W.twrite({{key = 'template/' .. W.hex(c[1]), value = t}})
+  end
+  local hx = W.hex('sb-7')
+  W.twrite({{key = 'template/' .. hx, value = tpl('sb-7', 1)}})
+  sql_write('UPDATE templates SET value = ? WHERE hex = ?', {'{"v":1,"name":"sb-7","saved_by":null,"tabs":[]}', hx})
+  local got = {}
+  for _, t in ipairs(a:call('templates.list', {after = 'sb', limit = 10}).templates) do got[t.name] = t end
+  for _, c in ipairs(cases) do expect(got[c[1]].saved_by).to_equal(c[2]) end
+  expect(got['sb-7'].saved_by).to_be(nil)
+  expect(got['sb-7'].tabs).to_be(0)
+  for i = 1, 7 do W.twrite({{key = 'template/' .. W.hex('sb-' .. i), delete = true}}) end
+end)

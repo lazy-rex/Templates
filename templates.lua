@@ -1460,12 +1460,13 @@ local function list_page(after, limit)
   end
   local page, size, last = {}, json_size({templates = {}}), nil
   -- The rows in hex order (the order of the old store keys). SQL reads only the summary of each
-  -- template: a row's JSON stays in the database. A reply that holds fewer rows than the query
+  -- template: a row's JSON stays in the database. saved_by comes as JSON text (the -> operator),
+  -- so it keeps its JSON type. A reply that holds fewer rows than the query
   -- gives more = true; the next query starts after the last row.
   local from = after and hex(after) or nil
   while true do
     local rows, more = app.db.query("SELECT hex, json_type(value, '$.tabs') AS tabs_type, json_array_length(value, '$.tabs') AS tabs,"
-      .. " json_extract(value, '$.saved_by') AS saved_by FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex LIMIT ?", from, from, LIST_MAX + 1)
+      .. " value -> '$.saved_by' AS saved_by FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex LIMIT ?", from, from, LIST_MAX + 1)
     for _, r in ipairs(rows) do
       local k = 'template/' .. r.hex
       local name = unhex(r.hex)
@@ -1477,7 +1478,7 @@ local function list_page(after, limit)
       local row, cost = nil, 0
       if r.tabs_type == 'array' or r.tabs_type == 'object' then
         if #page == limit then return list_result(page, last) end
-        row = {name = name, tabs = r.tabs, saved_by = r.saved_by}
+        row = {name = name, tabs = r.tabs, saved_by = r.saved_by and rex.json.decode(r.saved_by)}
         cost = json_size(row) + (#page > 0 and 1 or 0)
       end
       if size + cost + NEXT_AFTER + json_size(name) > LIST_BUDGET then
