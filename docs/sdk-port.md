@@ -269,8 +269,11 @@ What each table does today:
   `expired`. Then the cleanup deletes the marker (`templates_run.lua`, `expire`).
 - `start_forms`: the frozen request of a start (fingerprint, request, `at`), under the start's
   key. It is not a reply store. A start answers `{status = 'running'}` while it waits, and the
-  hub calls again. Each call reads the frozen request, so a call after a hub restart, or after
-  the run was retired, gives the same run. A marker's `form_rev` names the form, and the switch
+  hub calls again. Each call reads the frozen request. A UI poll of the Start form after a hub
+  restart gives the same run. A UI poll after the run was retired finishes with the retired
+  run's ID, with no new start and no switch. An agent replay of the same key works differently:
+  in the marker window it gives `expired`, and with changed arguments it gives
+  `operation_conflict`. A marker's `form_rev` names the form, and the switch
   wait uses `at` (Retention). A form stays until the cleanup deletes its marker: the cleanup
   deletes the form in the same transaction, only if the form's rev is the marker's `form_rev`. A
   form under a legacy marker (`form_rev` NULL) is not deleted. Starts do not use `ops`.
