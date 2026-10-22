@@ -156,14 +156,12 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   (`switch_app`). The form stays open until that decision. Its run is retired only when the switch
   row has a final state (`done`, `refused` or `unknown`), or when the start form is at
   least `switch_wait` + 60 s old (the form was closed, or the decision was lost). A missing or
-  `attempted` switch row waits for that bound. A start form without a valid `at` is from
-  before the switch: it never switches, so its run is retirable. Agent starts and starts into an
+  `attempted` switch row waits for that bound. Agent starts and starts into an
   existing session never switch. A step that must wait is tried again 60 s later, by its timer
   (`switch_settled` in `templates_run.lua`; the plugin gives it as the engine option `retirable`).
   So retirement is eventual: after the bound, and then at the next try.
 - **Replay.** An agent replay of a retired key within 30 days: `expired` (same arguments) or
-  `operation_conflict` (other arguments). A legacy run without a start form has a marker
-  without `form_rev`: a replay gets `expired` and writes no start form.
+  `operation_conflict` (other arguments).
   A Start form operation that runs again after its run was retired (a late poll, or the operation
   again after a hub restart) gets the retired run's ID: no new run, no new session, no switch. Its
   fingerprint must match, and the marker's `form_rev` must be the rev of its start form.
@@ -173,8 +171,7 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   check is on each use, before the fingerprint check: in the agent's alias lookup, in `start_core`
   and in `engine.admit`. A start form counts as absent only when its marker has expired
   and `form_rev` equals its rev. Then the new start replaces the form and the run key in the
-  admission transaction, which reads both again. A legacy marker never frees a later start form:
-  after 30 days that form decides the fingerprint.
+  admission transaction, which reads both again.
 - **Cleanup.** After the first full scan and then every 24 hours, the engine reads a page of
   expired markers (`expired_markers`) and queues each one. Each step reads both rows again in one
   transaction and deletes the marker only if it is the one the page gave (`run_id`, `expired_at`,

@@ -152,7 +152,18 @@ local function fixture()
     now=function() return f.now end, after=function(delay, fn) f.timers[#f.timers + 1] = {due=f.now + delay, fn=fn} end,
     wake=function() f.wakes = f.wakes + 1 end, data=f.data, transaction=f.transaction}
     for k, v in pairs(extra or {}) do o[k] = v end
-    return Run.new(o)
+    local e = Run.new(o)
+    -- admit without a form gets the form that the plugin (templates.lua, start_core) passes.
+    local admit = e.admit
+    function e.admit(req, form) return admit(req, form or f.form_for(req)) end
+    return e
+  end
+  -- form_for: the saved form of the key, or a new form when the key has none or its retired run's
+  -- marker expired (then the new form replaces it).
+  function f.form_for(req)
+    local saved = f.forms[req.key]
+    if saved and not Run.form_expired(saved, f.run_keys[req.key], f.now) then return {expect=copy(saved)} end
+    return {expect=saved and copy(saved) or false, write={fingerprint='fp', request=copy(req), at=f.now}}
   end
   return f
 end
@@ -271,7 +282,8 @@ function tests.relative_resolver_result()
   local f=fixture()
   local e=Run.new({hub=f.hub, start_tab=f.start, resolve_root=function() return '/' end,
     resolve_dir=function() return 'relative' end, data=f.data, transaction=f.transaction})
-  expect_error(function() e.admit(request()) end, 'invalid_input')
+  local req = request()
+  expect_error(function() e.admit(req, f.form_for(req)) end, 'invalid_input')
 end
 function tests.focus_intent_is_frozen()
   local f=fixture(); local e=f.engine(); local req=request()
@@ -802,23 +814,19 @@ end
 function tests.retention_cleanup_deletes_expired_markers_and_only_their_own_forms()
   local f = fixture()
   local old = f.now - Run.MARKER_TTL - 1
-  -- a: expired, its form; b: expired, the form was replaced (another rev); c: not expired;
-  -- d: legacy (no form_rev) with a form written later.
+  -- a: expired, its form; b: expired, the form was replaced (another rev); c: not expired.
   local ra = put_form(f, 'a', {fingerprint='fa'})
   f.run_keys['a'] = {run_id='1', expired_at=old, form_rev=ra}
   local rb = put_form(f, 'b', {fingerprint='fb'})
   put_form(f, 'b', {fingerprint='fb2'})
   f.run_keys['b'] = {run_id='2', expired_at=old, form_rev=rb}
   f.run_keys['c'] = {run_id='3', expired_at=f.now - Run.MARKER_TTL + 100, form_rev='1'}
-  put_form(f, 'd', {fingerprint='fd'})
-  f.run_keys['d'] = {run_id='4', expired_at=old}
   local e = f.engine(); e.resume(); rdrain(e)
   assert(f.run_keys['a'] == nil and f.forms['a'] == nil, 'a')
   assert(f.run_keys['b'] == nil and f.forms['b'].fingerprint == 'fb2', 'b keeps its new form')
   assert(f.run_keys['c'] ~= nil, 'c is not expired')
-  assert(f.run_keys['d'] == nil and f.forms['d'] ~= nil, 'd keeps the later form')
   -- The next cleanup runs 24 hours later.
-  f.run_keys['e'] = {run_id='6', expired_at=old}
+  f.run_keys['e'] = {run_id='6', expired_at=old, form_rev=put_form(f, 'e', {fingerprint='fe'})}
   rdrain(e)
   assert(f.run_keys['e'] ~= nil, 'not before 24 hours')
   f.fire(f.now + Run.CLEANUP_EVERY); rdrain(e)
@@ -879,9 +887,6 @@ function tests.switch_settled_waits_for_a_final_switch_decision_or_the_bound()
   end
   assert(S(run, form, nil, 1078, 78), 'no decision at the bound: retirable')
   assert(S(run, form, {state='attempted'}, 1078, 78), 'attempted at the bound: retirable')
-  assert(S(run, {rev='5', fingerprint='fp'}, nil, 1010, 78), 'a form without at never switches')
-  assert(S(run, {rev='5', fingerprint='fp', at='x'}, nil, 1010, 78), 'an invalid at never switches')
-  assert(S(run, nil, nil, 1010, 78), 'no form: nothing switches')
   assert(S({request={key='k', session_id='session:1'}}, form, nil, 1010, 78), 'an existing session: no switch')
   assert(S({request={key='k', new_session_name='S', by='alice'}}, form, nil, 1010, 78), 'an agent start: no switch')
 end
@@ -1065,6 +1070,18 @@ function tests.admission_conflicts_when_the_start_form_changes_during_prepare()
     assert(field ~= 'rev' or f.forms['start-1'].rev ~= rev, 'rev: the new form stays')
     admitted_nothing(f, 'start-1', field == 'rev' and 'fp' or 'other')
   end
+end
+-- The existing-run path (engine.admit): a start that read the key without a form (start_core), while
+-- another call admitted the same key and wrote its form, finds the live run with a new form to
+-- write. check_form refuses it: the first form and run stay, and nothing is written.
+function tests.admission_conflicts_when_another_call_admitted_the_key_after_the_form_read()
+  local f = fixture(); local e = f.engine()
+  local run = e.admit(request())
+  local before = f.state()
+  local ok, err = pcall(e.admit, request(), {expect=false, write={fingerprint='fp', request=request(), at=f.now}})
+  assert(not ok and type(err) == 'table' and err.code == 'conflict', 'conflict')
+  assert(equal(f.state(), before), 'nothing written')
+  assert(f.run_keys['start-1'].run_id == run.id, 'the first run keeps the key')
 end
 return tests
 end

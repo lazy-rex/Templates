@@ -16,15 +16,16 @@ local function template(a)
   a:call('templates.save', {name = name, root = root, session_id = s, key = 'ret-save-' .. S.n})
   return name, root
 end
--- finished_run is an open user run with no start form (no Start form: nothing waits for it).
+-- finished_run is an open user run.
 local function finished_run(i, root)
   return {id = tostring(i), status = 'open', next_tab = 1, root = root, tabs = {},
     request = {key = 'newer' .. i, root = root, new_session_name = 'n', template = {v = 1, name = 'n', tabs = {}}},
     results = {}, session_key = 'templates/' .. i .. '/session'}
 end
 -- newer writes the 200 finished runs after run id and wakes the engine with a worker change. Each
--- run has its run key, as a real start has (the engine skips a run that no run key names), and
--- no start form. counter: the run counter to write (default: the last of the 200).
+-- run has its run key, as a real start has (the engine skips a run that no run key names). The
+-- newer runs are never retired here, so they get no start form (it saves 200 writes). counter:
+-- the run counter to write (default: the last of the 200).
 local function newer(a, id, counter)
   local root = W.real(W.HOME)
   local first = tonumber(id) + 1
@@ -83,28 +84,6 @@ test('a retired key is free again 30 days after its removal, also with changed a
   expect(r.run_id).not_to_be(old)
   W.wait_run(alice, r.run_id, 'open')
   expect(W.run_key(op_key).expired_at).to_be(nil)
-end)
-
--- A legacy run: no start-form record when it was retired (its marker has no form_rev). A replay
--- within 30 days gives expired and writes nothing (the start form commits only with an admission);
--- after 30 days the key is free, and the same arguments start again.
-test('a legacy run without a start-form record: expired, then a new start after 30 days', function()
-  local bob = agent('bob')
-  local name, root = template(bob)
-  local op_key = W.agent_start_key('bob', 'ret-legacy')
-  local id = tostring(tonumber(W.counter()) + 1)
-  W.put_runs({{id = id, status = 'open', next_tab = 1, root = root, tabs = {}, results = {},
-    grant_id = 'grant:legacy', grant_revoked = true, session_key = 'templates/' .. id .. '/session',
-    request = {key = op_key, by = 'bob', root = root, new_session_name = name, template = {v = 1, name = name, tabs = {}}}}})
-  W.put_run_key(op_key, {run_id = id})
-  W.set_counter(id)
-  retire(bob, id)
-  expect(W.run_key(op_key).form_rev).to_be(nil)
-  expect_error(function() bob:call('templates.start', {template = name, root = root, key = 'ret-legacy'}) end, 'expired')
-  expect(W.form(W.agent_start_key('bob', 'ret-legacy'))).to_be(nil)
-  age(op_key, TTL + 1)
-  local r = bob:call('templates.start', {template = name, root = root, key = 'ret-legacy'})
-  W.wait_run(bob, r.run_id, 'open')
 end)
 
 -- An agent that took over a legacy ID (alice reports a conversation: her identity changes, and
@@ -184,13 +163,15 @@ local function submit(c, key)
   return op
 end
 
--- sentinel writes a finished run (with its run key) as the next run, and returns its ID.
+-- sentinel writes a finished run (with its run key and its start form, submitted an hour ago: no
+-- switch waits for it) as the next run, and returns its ID.
 -- With 200 newer runs, its retirement shows that the engine counted them.
 local function sentinel()
   local id = W.next_run_id()
   local run = finished_run(id, W.real(W.HOME))
   W.put_runs({run})
   W.put_run_key(run.request.key, {run_id = id})
+  W.put_form(run.request.key, {fingerprint = 'fp', request = run.request, at = os.time() - 3600})
   W.set_counter(id)
   return id
 end

@@ -12,7 +12,6 @@
 local M = {}
 local FRAME_MAX = 60 * 1024 -- under the SDK limit of 64 KiB, with room for its own fields
 local TOKEN = string.rep('0', 32) -- a hub.sql token is 32 hex digits (hub sqlsvc.go, newToken)
-local NULL = {null = true} -- the SDK tag of an SQL NULL parameter (a list cannot hold nil)
 M.FRAME_MAX = FRAME_MAX
 
 local SCHEMA = {
@@ -28,9 +27,9 @@ local SCHEMA = {
 -- INTEGER): runs sort by length(id), then id. status is a copy of value.status: each writer sets
 -- both in one statement. ver counts the writes of a run: a write after a hub call checks the ver
 -- that its read gave. A run_keys row with expired_at NULL names its live run; else it is the marker
--- of a retired run (form_rev NULL: a legacy marker). A start_forms row is the frozen request of a
--- start: rev is a revision of meta 'rev', and at is NULL in a legacy form. A switches row is the
--- app switch decision of a Start form ('attempted', then 'done', 'refused' or 'unknown').
+-- of a retired run, and form_rev is the rev of its start form. A start_forms row is the frozen
+-- request of a start: rev is a revision of meta 'rev', and at is its submit time. A switches row
+-- is the app switch decision of a Start form ('attempted', then 'done', 'refused' or 'unknown').
 local SCHEMA_2 = {
   'CREATE TABLE runs (id TEXT PRIMARY KEY, ver INTEGER NOT NULL, status TEXT NOT NULL, value TEXT NOT NULL)',
   'CREATE INDEX runs_order ON runs (length(id), id)',
@@ -227,8 +226,7 @@ function M.new(app)
     return out
   end
 
-  -- Start forms. get_form returns {rev, fingerprint, request, at} of key (at nil in a legacy form),
-  -- or nil.
+  -- Start forms. get_form returns {rev, fingerprint, request, at} of key, or nil.
   function S.get_form(key)
     local row = db.first('SELECT rev, fingerprint, request, at FROM start_forms WHERE key = ?', key)
     if row then return {rev = row.rev, fingerprint = row.fingerprint, request = rex.json.decode(row.request), at = row.at} end
@@ -239,7 +237,7 @@ function M.new(app)
     local rev = S.next_rev()
     write_text("INSERT INTO start_forms (key, rev, fingerprint, request, at) VALUES (?, ?, ?, '', ?) ON CONFLICT (key) DO UPDATE"
       .. " SET rev = excluded.rev, fingerprint = excluded.fingerprint, request = '', at = excluded.at", {key, rev},
-      'UPDATE start_forms SET fingerprint = fingerprint || ? WHERE key = ?', {key}, fingerprint, {type(at) == 'number' and app.int(at) or NULL})
+      'UPDATE start_forms SET fingerprint = fingerprint || ? WHERE key = ?', {key}, fingerprint, {app.int(at)})
     write_text('UPDATE start_forms SET request = ? WHERE key = ?', {},
       'UPDATE start_forms SET request = request || ? WHERE key = ?', {key}, rex.json.encode(request), {key})
     return rev

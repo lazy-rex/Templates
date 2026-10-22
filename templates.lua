@@ -751,8 +751,8 @@ local function switch_app(view_id, start_key, run_id, at)
     if not inserted then return switch_app(view_id, start_key, run_id, at) end
     return value
   end
-  -- Expiry comes first: a recovered or legacy start (no at) never switches late, even when its
-  -- first tab is open now (Codex's review).
+  -- Expiry comes first: a recovered start never switches late, even when its first tab is open
+  -- now (Codex's review).
   if os.time() - at >= SWITCH_WAIT then
     return first({state = 'refused', code = 'timeout', message = 'The automatic-switch wait (' .. SWITCH_WAIT .. ' s) expired'})
   end
@@ -796,11 +796,10 @@ local function start_core(caller, key, fingerprint, intent)
     -- after a hub restart) gets that run's ID: no new run, no switch. The marker must name this
     -- form record (form_rev). An agent's replay gets expired (engine.admit).
     local m = marker
-    if caller.id == 'user' and m and m.expired_at ~= nil and m.form_rev ~= nil and m.form_rev == saved.rev then
+    if caller.id == 'user' and m and m.expired_at ~= nil and m.form_rev == saved.rev then
       return saved.request, {id = m.run_id, retired = true}
     end
-    -- A form from before the switch has no time: its wait is over.
-    request, at = saved.request, type(saved.at) == 'number' and saved.at or 0
+    request, at = saved.request, saved.at
     form = {expect = saved}
   else
     -- Checked before the frozen request is written: the run repeats the session ID in each tab.

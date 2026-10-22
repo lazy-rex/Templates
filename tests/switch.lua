@@ -198,27 +198,23 @@ test('F5 F6 the form waits and says Starting; the wait expires; the late first t
   a:close()
 end)
 
--- F7 F8: a recovered start whose wait is over never switches, even when its first tab is open now:
--- a legacy start record without at, and one older than the wait.
-for _, case in ipairs({{'F7 a legacy start record without at', function(v) v.at = nil end},
-    {'F8 a start record older than the wait', function(v) v.at = v.at - 60 end}}) do
-  test(case[1] .. ' never switches late', function()
-    local c = prepare()
-    local a = app('sw-app-' .. case[1]:sub(1, 2), {sessions = {c.s}})
-    local id, release = hold()
-    local _, key = c.form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = c.values}, operation_key = c.key})
-    local fk = W.start_key(c.key)
-    local form = wait('the start form', function() return W.form(fk) end, 10)
-    case[2](form)
-    W.put_form(fk, form)
-    release()
-    W.wait_run(S.alice, id, 'open')
-    expect(c.form:settle(key, 20).status).to_be('succeeded')
-    expect(W.switch(W.start_key(c.key)).code).to_be('timeout')
-    expect(#a:calls()).to_be(0)
-    a:close()
-  end)
-end
+-- F8: a recovered start whose wait is over never switches, even when its first tab is open now.
+test('F8 a start record older than the wait never switches late', function()
+  local c = prepare()
+  local a = app('sw-app-F8', {sessions = {c.s}})
+  local id, release = hold()
+  local _, key = c.form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = c.values}, operation_key = c.key})
+  local fk = W.start_key(c.key)
+  local form = wait('the start form', function() return W.form(fk) end, 10)
+  form.at = form.at - 60
+  W.put_form(fk, form)
+  release()
+  W.wait_run(S.alice, id, 'open')
+  expect(c.form:settle(key, 20).status).to_be('succeeded')
+  expect(W.switch(W.start_key(c.key)).code).to_be('timeout')
+  expect(#a:calls()).to_be(0)
+  a:close()
+end)
 
 -- The same operation again: a hub restart while the form waits. The hub runs the operation of
 -- the same key again, so the plugin is called with it again. The start replays the same run, and

@@ -137,22 +137,19 @@ function M.expired(marker, now)
   return type(marker) == 'table' and type(marker.expired_at) == 'number' and now - marker.expired_at >= MARKER_TTL
 end
 -- form_expired: a start form (a start_forms row) that counts as absent: its run key's marker (a
--- run_keys row) has expired and names this form (form_rev). A legacy marker without form_rev
--- never frees a later form.
+-- run_keys row) has expired and names this form (form_rev).
 function M.form_expired(form, marker, now)
   return type(form) == 'table' and type(marker) == 'table' and M.expired(marker, now)
-    and marker.form_rev ~= nil and marker.form_rev == form.rev
+    and marker.form_rev == form.rev
 end
 -- switch_settled: a user start into a new session has a Start form that switches the app once
 -- (templates.lua, switch_app). Its run is retirable only when the switch decision is final (a
 -- switches row that is not 'attempted'), or when the form is at least bound seconds old (the form
--- was closed, or the decision was lost). A form without at is from before the switch: it never
--- switches. Other starts never switch.
+-- was closed, or the decision was lost). Other starts never switch.
 local FINAL = {done = true, refused = true, unknown = true}
 function M.switch_settled(run, form, switch, now, bound)
   if by_agent(run) or not run.request.new_session_name then return true end
   if type(switch) == 'table' and FINAL[switch.state] then return true end
-  if type(form) ~= 'table' or type(form.at) ~= 'number' then return true end
   return now - form.at >= bound
 end
 
@@ -372,9 +369,10 @@ function M.new(opts)
   end
   -- Repeated admission uses the original request before checking today's directories or template.
   -- The frozen requests survive a changed profile, template, cwd, or plugin process. form
-  -- (optional, templates.lua start_core): the start form {expect, write}; its check and its write
-  -- commit in the admission transaction.
+  -- (templates.lua start_core): the start form {expect, write}; its check and its write commit in
+  -- the admission transaction. Every run has its start form from its admission.
   function engine.admit(request, form)
+    assert(type(form) == 'table', 'admit needs the start form')
     fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
     text(request.key, 'key')
     local key = request.key
@@ -391,7 +389,7 @@ function M.new(opts)
     if existing then
       local run = engine.get(existing.run_id)
       if not same(run.request, request) then fail('operation_conflict', 'This key has different content') end
-      if form and form.write then transaction(function() check_form(key, form) end) end
+      if form.write then transaction(function() check_form(key, form) end) end
       if not finished(run) then enqueue(run.id) end
       return run
     end
@@ -401,7 +399,7 @@ function M.new(opts)
       if not same_key(data.get_run_key(key), read_key) then
         fail('conflict', 'This start is being submitted twice; retry with the same key')
       end
-      if form then check_form(key, form) end
+      check_form(key, form)
       -- Decimal addition keeps operation IDs exact beyond Lua's integer precision.
       local digits, carry = tostring(data.get_counter() or '0'), 1
       local id = ''
@@ -655,9 +653,9 @@ function M.new(opts)
       if not k or k.run_id ~= id or k.expired_at ~= nil then return 'drop' end
       local f, s = data.get_form(key), data.get_switch(key)
       -- opts.retirable (the plugin: switch_settled) can postpone the step: it is tried again later.
-      if opts.retirable and not opts.retirable(copy(run), f and copy(f), s and copy(s), now()) then return 'later' end
+      if opts.retirable and not opts.retirable(copy(run), copy(f), s and copy(s), now()) then return 'later' end
       data.delete_run(id)
-      data.mark_run_key(key, id, now(), f and f.rev or nil)
+      data.mark_run_key(key, id, now(), f.rev)
       if s then data.delete_switch(key) end
       return 'retired'
     end)
@@ -674,7 +672,7 @@ function M.new(opts)
       if not k or k.run_id ~= expect.run_id or k.expired_at ~= expect.expired_at or k.form_rev ~= expect.form_rev
         or not M.expired(k, now()) then return end
       data.delete_run_key(key)
-      local f = k.form_rev ~= nil and data.get_form(key)
+      local f = data.get_form(key)
       if f and f.rev == k.form_rev then data.delete_form(key) end
     end)
   end
