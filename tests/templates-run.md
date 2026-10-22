@@ -254,10 +254,9 @@ replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
 
 ## Save form renders
 
-The hub renders every open view of the plugin again after each SQL commit that writes a table,
-each `app.refresh()` and each worker change (hub `docs/hub.md`, "Snapshots
-and invalidation"; for SQL commits: the source of LazyRex f413b36, `sqlsvc.go` calls `kickViews`
-after a commit with table marks). A
+The Save form is broad ("Render inputs"): the hub renders it again after each SQL commit of the
+plugin that writes a table, each `app.refresh()` and each worker change (hub `docs/hub.md`,
+"Snapshots and invalidation"). On the released hub (v0.4.1) every open view renders on these. A
 start makes many of these, so an open Save form renders many times. Each render captures the
 source session again: per pane `hub.spawn.spec`, `terminal.process` and `terminal.pwd`, then
 `realpath` and `test -d`, and `git rev-parse` for the common root.
@@ -477,7 +476,8 @@ source) and the refresh that each view gets with read tracking:
   - The early paths return before any other input: a named template that is missing or has an
     unusable name, an empty template list, the fixed tree over the budget (`too_large_view`), a
     selected template option that does not fit, and no usable template option. They read SQL and
-    `starting` only: tracked, with `app.refresh()` for `starting`.
+    `starting` only: tracked, with `app.refresh()` for `starting` (source-reviewed; no lab test
+    drives an early path).
   - The normal path also reads the source pane (`source_dir`: Rex `terminal.process` and
     `terminal.pwd` through `pane_dir`, the file system through `realpath` and `test -d`, and the
     git root through a `git` subprocess) and calls `hub.session.list`. The SDK makes it broad.
@@ -487,8 +487,8 @@ source) and the refresh that each view gets with read tracking:
     file system); `is_shell` (`SHELL`).
   - With panes, `save_fields`: `hub.profiles` (caught with `pcall`), `common_root` (git and the
     file system) and `short` (`HOME`); and `session_label` (`hub.session.list`).
-  - The SDK makes it broad (Rex and hub calls). Because it reads no table, a tracked render would
-    never render again.
+  - The SDK makes it broad: it detects the Rex and hub calls. Also, the hub refreshes a render
+    that read no table broadly (hub d912148 `renderreads.go`, the zero-table fallback).
 
 ## Verification
 
