@@ -365,6 +365,33 @@ defers app.form, replacing the view-by-view port"): option A with the hub read t
 - The comparison above was the input to this decision. Render dependencies do not separate A
   from C: both get them from the hub read tracking.
 
+### Read tracking: the render audit (proposed; before the opt-in)
+
+The hub tracks the tables that a render reads when the render opts in (`refresh = "reads"`; hub
+main eb61bb2 and d7d143c, docs/hub.md "SQL read tracking"; the SDK opt-in comes with SDK 4.2).
+Any hub call in the render other than a `hub.sql.query` with its render ID makes the render
+untracked, and the view keeps the default (each SQL commit renders it again). The hub cannot see
+Rex calls, Lua state, files or the clock. This audit lists each view's inputs outside SQL
+(Templates 9969f30; read in source, not tested with the opt-in).
+
+- Panel (`/panels/templates`): templates, runs, run counts and switches from SQL. Outside SQL:
+  `HOME` only (`short`), which does not change while the plugin runs. Safe to opt in.
+- Template menu (`/forms/template/<hex>`) and Delete confirmation (`/forms/delete/<hex>/<rev>`):
+  the template row from SQL only. Safe to opt in.
+- Start form (`/forms/start`): the Lua table `starting[view_id]`, Rex reads (the source pane's
+  directory and git root, `source_dir`), and `hub.session.list`. On the normal path the
+  `hub.session.list` call makes the render untracked. Two early paths (template gone, list too
+  large) read SQL and `starting` only. Each change of `starting` calls `hub.ui.invalidate` (set at
+  `start_poll`; cleared after a definite error in `start_session`), which renders the views apart
+  from the table set, or closes the form (cleared before `done`). Safe to opt in.
+- Save form (`/forms/save`): Rex reads (`capture`) and, with panes, `hub.session.list`, so the
+  render is untracked; with no panes it reads no table, so it is never tracked. Opting in gains
+  nothing.
+
+Lab check (no opt-in yet): Templates 9969f30 on hub main 12c186c with its `sdk/lua`, Rex
+0.0.1792158932-g88fd41: 25 of 25 files, 244 tests, parity sweep 4/4. With no opt-in, every view
+keeps the default.
+
 ## 6. SDK gaps (sent 2026-10-22)
 
 The coordinator reports that the SDK v0 surface covers forms and routes (`app.view`), structured
