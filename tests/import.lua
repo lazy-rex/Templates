@@ -228,7 +228,7 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
     {key = 'start-form/' .. hex(K4), value = {fingerprint = 'fp-4', request = {key = K4}}}})
   local form_rev = store('start-form/' .. hex(K2)).rev
   write({{key = 'run/' .. BIG, value = run_value(BIG, K1, 'open')},
-    {key = 'run/77', value = run_value('77', 'start/' .. part('i2-agent'), 'dismissed', {dismissed_from = 'blocked', grant_id = 'grant:i2'})},
+    {key = 'run/77', value = run_value('77', 'start/' .. part('i2-agent'), 'dismissed', {dismissed_from = 'blocked', grant_id = 'grant:i2', grant_revoked = true})},
     {key = 'run-counter', value = BIG},
     {key = 'run-key/' .. K1, value = {id = BIG}},
     {key = 'run-key/' .. K2, value = {id = '5', expired_at = 1000, form_rev = form_rev}},
