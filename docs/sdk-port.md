@@ -243,7 +243,7 @@ effect or a held revision needs it, and each guard that stays is listed here wit
 - Tested: LazyRex hub/sql-lab f413b36 with SDK eb9654d at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
   All 25 files pass (Templates a52ab11).
 
-### Slice 4: options for the table decision (proposed; for the coordinator)
+### Slice 4: options for the table decision (decided: option A)
 
 Release 4 keeps the private tables `ops` and `start_forms` and the raw views (coordinator
 decision, 2026-10-22). Slice 4 decides whether they stay. This section compares the options. The
@@ -353,13 +353,17 @@ Option C: `app.form` and `app.panel` in place of the raw views.
 - `start_forms` stays in option C: a `running` reply is never saved, so the frozen request needs
   a table of its own either way.
 
-Recommendation (proposed; to confirm again with the coordinator): keep `start_forms` in every
-option. Render dependencies do not separate A from C: both get them from hub 4.1 or 4.2. Take C
-only for its own gains (the SDK value checks, the standard form, less view code), view by view,
-starting with the Delete confirmation and the template menu (small, few tests). Each view needs a
-plan for its old route and its replay before the change. Else A with the hub read tracking is
-enough. Decide option B separately: it reopens decision 1, and the `tx = false` reply gap blocks
-it for dismiss and retry.
+Decision (coordinator, 2026-10-22; vault decision "LazyRex Templates slice 4 keeps raw views and
+defers app.form, replacing the view-by-view port"): option A with the hub read tracking.
+
+- Keep the raw views and the tables `ops` and `start_forms`. The render dependencies come from the
+  hub read tracking (hub 4.1). Verify them in a lab when hub 4.1 is on main.
+- Option C is not planned. A later proposal can take one view, only if its own gains (above)
+  clearly pay for the route change.
+- Option B stays deferred: it reopens decision 1, and the `tx = false` reply gap blocks it for
+  dismiss and retry.
+- The comparison above was the input to this decision. Render dependencies do not separate A
+  from C: both get them from the hub read tracking.
 
 ## 6. SDK gaps (sent 2026-10-22)
 
