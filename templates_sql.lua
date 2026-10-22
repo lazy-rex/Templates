@@ -46,8 +46,6 @@ function M.new(app)
   db.migrate({
     function(d) for _, sql in ipairs(SCHEMA) do d.exec(sql) end end,
     function(d) for _, sql in ipairs(SCHEMA_2) do d.exec(sql) end end,
-    -- 3: delete the metadata of the removed hub.store import (its cursors and done flags).
-    "DELETE FROM meta WHERE k = 'import' OR k LIKE 'import/%'",
   })
 
   local function fail(code, message) error({code = code, message = message}, 0) end
