@@ -196,13 +196,25 @@ local function capture(session_id)
             local child = ok and proc.child or {}
             local fg = ok and proc.foreground or {}
             pane.dir = pane_dir(session_id, id, child, fg, spec.found and spec.cwd or nil)
+            -- A spawned pane: its profile, and the title that its caller requested (hub.spawn.spec
+            -- requested_title, only when title_source is request). A resolved title (a default, a
+            -- generated agent name) is display text only (tests/templates-run.md, "Titles").
+            local title = spec.found and type(spec.title) == 'string' and spec.title ~= '' and spec.title or nil
+            if spec.found then
+              pane.spawn_profile = spec.profile
+              if spec.title_source == 'request' and type(spec.requested_title) == 'string' and spec.requested_title ~= '' then
+                pane.requested_title = spec.requested_title
+              end
+            end
             if spec.found and spec.profile ~= SHELL_PROFILE then
               pane.guess, pane.args = 'profile:' .. spec.profile, spec.args or {}
-              pane.detail = spec.title
+              pane.detail = title
             else
               local idle = child.pid and fg.pid == child.pid
-              if idle and is_shell(child) then pane.guess = 'shell'
-              elseif child.pid then pane.detail = 'running ' .. tostring((idle and child.name) or fg.name or 'a program') end
+              if idle and is_shell(child) then pane.guess, pane.detail = 'shell', title
+              elseif child.pid then
+                pane.detail = (title and title .. ' · ' or '') .. 'running ' .. tostring((idle and child.name) or fg.name or 'a program')
+              else pane.detail = title end
             end
             if not pane.dir then pane.detail = 'directory unknown'; pane.guess = nil end
             result.panes[id], result.order[#result.order + 1] = pane, id
@@ -355,17 +367,17 @@ local function session_label(session_id)
   end
 end
 
-local function to_layout(node, cap, launches, root)
+local function to_layout(node, cap, launches, root, labels)
   if node.split then
-    local b = to_layout(node.split.before, cap, launches, root)
-    local a = to_layout(node.split.after, cap, launches, root)
+    local b = to_layout(node.split.before, cap, launches, root, labels)
+    local a = to_layout(node.split.after, cap, launches, root, labels)
     if not b then return a end
     if not a then return b end
     return {direction = node.split.direction, ratio = node.split.ratio, before = b, after = a}
   end
   local launch = launches[node.block_id]
   if not launch then return nil end
-  return {launch = launch, dir = relative(cap.panes[node.block_id].dir, root)}
+  return {launch = launch, dir = relative(cap.panes[node.block_id].dir, root), label = labels and labels[node.block_id] or nil}
 end
 
 -- values_fingerprint covers the submitted values and the source session in a stable order, so a
@@ -506,7 +518,7 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill, re
       values['pane_' .. id] = pane.dir and (pane.guess or '@choose') or '@skip'
     end
   end
-  local launches = {}
+  local launches, labels = {}, {}
   for _, id in ipairs(cap.order) do
     local choice, pane = values['pane_' .. id], cap.panes[id]
     if choice == '@choose' then fail('invalid_input', 'Choose a launch or Leave out for each pane') end
@@ -523,11 +535,16 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill, re
         if pane.guess == choice and pane.args and next(pane.args) then launch.args = pane.args end
         launches[id] = launch
       else fail('invalid_input', 'Unknown launch choice') end
+      -- The requested title belongs to the profile that the pane ran: a leaf keeps it only when
+      -- the chosen launch is that profile (also an explicit Shell for a busy shell spawn).
+      local same = (choice == 'shell' and pane.spawn_profile == SHELL_PROFILE) or
+        (choice:sub(1, 8) == 'profile:' and choice:sub(9) == pane.spawn_profile)
+      if pane.requested_title and same then labels[id] = pane.requested_title end
     end
   end
   local tabs = {}
   for _, tab in ipairs(cap.tabs) do
-    local layout = to_layout(tab.layout, cap, launches, root)
+    local layout = to_layout(tab.layout, cap, launches, root, labels)
     if layout then tabs[#tabs + 1] = {title = tab.title, layout = layout} end
   end
   if #tabs == 0 then fail('invalid_input', 'The template has no panes') end
@@ -1505,7 +1522,7 @@ local agent_handlers = {
       local p = cap.panes[id]
       if p.dir then dirs[#dirs + 1] = p.dir end
       panes[#panes + 1] = {block_id = id, tab = p.tab, tab_title = cap.tabs[p.tab].title, dir = p.dir,
-        guess = p.guess, args = p.args, detail = p.detail}
+        guess = p.guess, args = p.args, detail = p.detail, requested_title = p.requested_title}
     end
     local profile_list = {}
     for _, p in ipairs(profiles()) do profile_list[#profile_list + 1] = {id = p.id, name = p.name or p.id} end

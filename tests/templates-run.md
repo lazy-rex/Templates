@@ -282,6 +282,38 @@ is open or not (hub `viewsvc.go`, `runOps`).
 - After a plugin restart, the next call sets the state again; until then the form can render
   without "Starting…" (untested).
 
+## Titles
+
+A save keeps a pane's launch title as the leaf `label` only when the caller of the spawn asked for
+that title. The hub records the request: `hub.spawn.spec` gives `requested_title` and
+`title_source = 'request'` (LazyRex 03ef95f or later). A resolved title is not saved:
+
+- A spawn without a title gets the profile's name. A save of that pane gives no label, so the next
+  start uses the profile's name at that time (a profile renamed after the spawn included).
+- An agent spawn without a title gets a generated name ("Bot 1"). The hub counts these names for
+  each profile. A save gives no label, so the next start gets a new name, not a copy of the old one.
+
+The label is kept only when the saved launch is the launch that the pane ran:
+
+- `profile:<id>` with the profile of the spawn, or
+- `shell` for a pane that LazyRex spawned as a shell (an idle shell, or a busy shell with an
+  explicit Shell choice).
+
+Another launch, or Leave out, drops the label. `templates.capture` shows `requested_title` for each
+pane that has one. The Save form shows the pane's title in its label: `<tab> · <title>`, and for a
+busy shell `<tab> · <title> · running <program>`.
+
+Out of scope: a pane renamed after its spawn keeps its requested title in the save, not the new
+name (source review, untested). A plain Rex pane (not spawned by LazyRex) has no spawn spec and
+gets no label. A hub before 03ef95f gives no `title_source`; the pane then gets no label (source
+review only, untested).
+
+`templates.capture` has no reply byte limit (a gap from before this change). A title is at most 60
+characters, so `requested_title` adds at most about 400 bytes of JSON to a pane (6 bytes for each
+escaped character).
+
+Tests: `tests/titles.lua` (observed on Rex 0.0.1792158932-g88fd41 with LazyRex 03ef95f).
+
 ## Size bounds
 
 One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The
