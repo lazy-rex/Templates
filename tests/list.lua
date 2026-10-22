@@ -317,3 +317,22 @@ test('templates.list keeps the JSON type of saved_by', function()
   expect(got['sb-7'].tabs).to_be(0)
   for i = 1, 7 do W.twrite({{key = 'template/' .. W.hex('sb-' .. i), delete = true}}) end
 end)
+
+-- A list query reads up to LIST_MAX + 1 summaries, and a summary can be large (here a saved_by of
+-- 30 000 bytes). 40 such summaries are over one hub.sql reply, so the query reads all its pages
+-- (app.db.each): app.db.query gives too_large for a result that does not fit in one reply (SDK
+-- cf811b5). Each summary fits the page budget alone, so each page before the page of sq-40 has one template.
+test('templates.list reads summaries over one SQL reply', function()
+  local a = agent('alice')
+  local want = {}
+  for i = 1, 40 do
+    want[i] = string.format('sq-%02d', i)
+    put(want[i], 1, string.rep('x', 30000))
+  end
+  local names, list = pages(a, 50, 'sq')
+  local got = {}
+  for _, n in ipairs(names) do if n:match('^sq%-') then got[#got + 1] = n end end
+  expect(got).to_equal(want)
+  for i = 1, 39 do expect(#list[i].templates).to_be(1) end
+  for i = 1, 40 do W.twrite({{key = 'template/' .. W.hex(want[i]), delete = true}}) end
+end)

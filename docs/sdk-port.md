@@ -164,6 +164,10 @@ effect or a held revision needs it, and each guard that stays is listed here wit
   records; that test does not check the order). Rex can still deliver it after the import
   (observed in one lab run, not in another). Either way, a retry with the same key answers as one
   save.
+- Reads: a read of many rows uses `app.db.each`. Since SDK cf811b5, `app.db.query` gives
+  `too_large` for a result that does not fit in one reply. `templates()` reads every row.
+  `templates.list` reads at most LIST_MAX + 1 summaries in each query (`tests/list.lua`, "summaries
+  over one SQL reply"; `tests/scan.lua` for `templates()`).
 - Tests: `tests/import.lua` (every record shape with its exact JSON text and rev, string values,
   the operations, the revision floor, a failed append between two chunks, a failed commit, a lost
   commit reply, the largest row, a key over the budget, a call during the import),
@@ -171,7 +175,10 @@ effect or a held revision needs it, and each guard that stays is listed here wit
   replay). The test helpers `W.twrite` and `W.trow` write and read template rows as another writer
   would.
 - Tested: LazyRex hub/sql-lab f413b36 (the launcher, hub.sql, the store fence and
-  `hub.admin.sql_return`) with SDK origin/sdk/lua 42cebcc at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
+  `hub.admin.sql_return`) with SDK origin/sdk/lua cf811b5 at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
+  On this hub, a render has no render token, and SDK cf811b5 then reads `app.db.each` in a
+  transaction: a test `sql_write` during a render gets `busy`. The suite passes with a local SDK change that marks
+  each render frame (sent to the hub lead as an SDK defect; untested with an SDK fix).
 
 ## 6. SDK gaps (sent 2026-10-22)
 

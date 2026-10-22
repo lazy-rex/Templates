@@ -253,18 +253,14 @@ local function json_safe(s) return rex.json.decode(rex.json.encode(s)) == s end
 -- templates returns {hex, name, value} for each template record in key order. name is the name of
 -- the key when it is JSON-safe, else nil.
 local function templates()
-  local list, after = {}, nil
-  repeat
-    local rows, more = app.db.query('SELECT hex, value FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex', after, after)
-    for _, row in ipairs(rows) do
-      local value = rex.json.decode(row.value)
-      if type(value) == 'table' then
-        local name = unhex(row.hex)
-        list[#list + 1] = {hex = row.hex, name = name and json_safe(name) and name or nil, value = value}
-      end
-      after = row.hex
+  local list = {}
+  app.db.each('SELECT hex, value FROM templates ORDER BY hex', function(row)
+    local value = rex.json.decode(row.value)
+    if type(value) == 'table' then
+      local name = unhex(row.hex)
+      list[#list + 1] = {hex = row.hex, name = name and json_safe(name) and name or nil, value = value}
     end
-  until not more
+  end)
   return list
 end
 -- display returns a text for a view: control characters become spaces, and a text over 200 bytes
@@ -1469,12 +1465,14 @@ local function list_page(after, limit)
   local page, size, last = {}, json_size({templates = {}}), nil
   -- The rows in hex order (the order of the old store keys). SQL reads only the summary of each
   -- template: a row's JSON stays in the database. saved_by comes as JSON text (the -> operator),
-  -- so it keeps its JSON type. A reply that holds fewer rows than the query
-  -- gives more = true; the next query starts after the last row.
+  -- so it keeps its JSON type. A query reads at most LIST_MAX + 1
+  -- rows with app.db.each (a row can be large: a foreign key of 63 KB), and the next query starts
+  -- after the last row. A query with fewer rows reads the last rows.
   local from = after and hex(after) or nil
   while true do
-    local rows, more = app.db.query("SELECT hex, json_type(value, '$.tabs') AS tabs_type, json_array_length(value, '$.tabs') AS tabs,"
-      .. " value -> '$.saved_by' AS saved_by FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex LIMIT ?", from, from, LIST_MAX + 1)
+    local rows = {}
+    app.db.each("SELECT hex, json_type(value, '$.tabs') AS tabs_type, json_array_length(value, '$.tabs') AS tabs,"
+      .. " value -> '$.saved_by' AS saved_by FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex LIMIT ?", from, from, LIST_MAX + 1, function(r) rows[#rows + 1] = r end)
     for _, r in ipairs(rows) do
       local k = 'template/' .. r.hex
       local name = unhex(r.hex)
@@ -1500,7 +1498,7 @@ local function list_page(after, limit)
       last = name
       from = r.hex
     end
-    if not more and #rows <= LIST_MAX then return list_result(page, nil) end
+    if #rows <= LIST_MAX then return list_result(page, nil) end
   end
 end
 local function get_template(name)
