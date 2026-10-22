@@ -1002,5 +1002,52 @@ function tests.a_save_after_a_hub_call_over_a_changed_run_writes_nothing()
   e.wake(); drain(e)
   assert(e.get(run.id).status == 'open' and f.creates == 2, 'the next wake opens each tab once')
 end
+-- The admission re-checks (templates_run.lua, engine.admit): prepare calls the hub (resolve_root)
+-- between the first read and the transaction. Another writer that changes the run key or the start
+-- form in that interval wins: admission fails with conflict and writes no form, key, counter or
+-- run. Rex Lua runs one handler at a time, so the lab cannot interleave two handlers here; the
+-- resolver hook makes the change.
+local function admitted_nothing(f, key, form)
+  assert(f.records['run-counter'] == nil, 'no counter')
+  for k in pairs(f.records) do assert(not k:match('^run/'), 'no run: ' .. k) end
+  if form then assert(f.records['start-form/' .. key].value.fingerprint == form, 'the other form stays')
+  else assert(f.records['start-form/' .. key] == nil, 'no form') end
+end
+local function changed_in_prepare(change)
+  local f = fixture()
+  local e = f.engine({resolve_root=function(root) if change then local c = change; change = nil; c(f) end; return root end})
+  return f, e
+end
+function tests.admission_conflicts_when_the_run_key_changes_during_prepare()
+  local f, e = changed_in_prepare(function(f) f.data.put_run_key('start-1', '99') end)
+  local ok, err = pcall(e.admit, request(), {expect=false, write={fingerprint='fp', request={key='start-1'}, at=1}})
+  assert(not ok and type(err) == 'table' and err.code == 'conflict', 'conflict')
+  assert(f.records['run-key/start-1'].value.id == '99', 'the other key stays')
+  admitted_nothing(f, 'start-1')
+end
+function tests.admission_conflicts_when_the_start_form_appears_during_prepare()
+  local f, e = changed_in_prepare(function(f) f.data.put_form('start-1', 'other', {key='start-1'}, 2) end)
+  local ok, err = pcall(e.admit, request(), {expect=false, write={fingerprint='fp', request={key='start-1'}, at=1}})
+  assert(not ok and type(err) == 'table' and err.code == 'conflict', 'conflict')
+  assert(f.records['run-key/start-1'] == nil, 'no key')
+  admitted_nothing(f, 'start-1', 'other')
+end
+function tests.admission_conflicts_when_the_start_form_changes_during_prepare()
+  for _, field in ipairs({'rev', 'fingerprint'}) do
+    local f = fixture()
+    local rev = f.data.put_form('start-1', 'fp', {key='start-1'}, 1)
+    local expect = f.data.get_form('start-1')
+    local e = f.engine({resolve_root=function(root)
+      if field == 'rev' then f.data.put_form('start-1', 'fp', {key='start-1'}, 1)
+      else f.records['start-form/start-1'].value.fingerprint = 'other' end
+      return root
+    end})
+    local ok, err = pcall(e.admit, request(), {expect=expect})
+    assert(not ok and type(err) == 'table' and err.code == 'conflict', field .. ': conflict')
+    assert(f.records['run-key/start-1'] == nil, field .. ': no key')
+    assert(field ~= 'rev' or f.records['start-form/start-1'].rev ~= rev, 'rev: the new form stays')
+    admitted_nothing(f, 'start-1', field == 'rev' and 'fp' or 'other')
+  end
+end
 return tests
 end

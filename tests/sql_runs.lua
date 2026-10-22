@@ -97,6 +97,48 @@ test('a run over the frame limit as a parameter opens; each save is a chunked up
   expect(run.value.tabs[1].request.layout ~= nil).to_be(true)
 end)
 
+-- A failed append in a chunked run update (templates_sql.lua, update_run: the UPDATE with the ver
+-- check, then "value = value || ?"). The pad makes the run over the frame limit as a parameter
+-- ("<" is 7 bytes there), so a dismiss writes it in 2 chunks. A fault fails a call by its number
+-- only, so a probe dismiss of an equal run gives the number of the first append; the test then
+-- checks that the fault failed that statement.
+local function big_authorizing(id, name)
+  local key = 'start/agent/' .. part('alice') .. part(name)
+  W.twrite({{key = 'run/' .. id, value = {id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
+    pad = string.rep('<', 9000), session_key = 'templates/' .. id .. '/session', request = {key = key, by = 'alice', root = '/',
+    new_session_name = 'sr', template = {v = 1, name = 'sr', tabs = {}}}}}, {key = 'run-key/' .. key, value = {id = id}}})
+end
+local function run_row(id) return sql('SELECT ver, status, value FROM runs WHERE id = ?', {id})[1] end
+local function is_append(c) return c.args.sql:match('^UPDATE runs SET value = value || %?') ~= nil end
+
+test('a failed append in a chunked run update commits nothing; the run keeps its value, ver and status', function()
+  local alice = agent('alice')
+  big_authorizing('9101', 'sr-probe')
+  big_authorizing('9102', 'sr-append')
+  local _, base = calls('none')
+  alice:call('templates.dismiss', {run_id = '9101', key = 'sr-probe'})
+  local nth
+  for i, c in ipairs(calls('hub.sql.exec', {after = base.next})) do
+    if is_append(c) then nth = i break end
+  end
+  expect(nth ~= nil).to_be(true)
+  local before = run_row('9102')
+  local _, base2 = calls('none')
+  local f = fault({point = 'action', action = 'hub.sql.exec', when = 'before', mode = 'fail', nth = nth})
+  local ok = pcall(alice.call, alice, 'templates.dismiss', {run_id = '9102', key = 'sr-append'})
+  expect(ok).to_be(false)
+  expect(fault_fired(f)).to_be(true)
+  local execs = calls('hub.sql.exec', {after = base2.next})
+  expect(is_append(execs[nth])).to_be(true)
+  expect(execs[nth - 1].args.sql).to_match('^UPDATE runs SET ver = ver %+ 1')
+  expect(run_row('9102')).to_equal(before)
+  expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part('alice') .. part('sr-append')})).to_be(0)
+  expect(alice:call('templates.dismiss', {run_id = '9102', key = 'sr-append'})).to_equal({run_id = '9102', status = 'dismissed'})
+  local after = run_row('9102')
+  expect(after.ver).to_be(before.ver + 1)
+  expect(rex.json.decode(after.value).pad).to_be(string.rep('<', 9000))
+end)
+
 -- status is a copy of value.status: every writer sets both (admission, each save, dismiss, the
 -- import, the test writer). This file's runs went through each engine write.
 test('every run row has status = value.status', function()
