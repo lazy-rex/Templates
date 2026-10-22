@@ -257,6 +257,17 @@ function W.put_form(key, form)
   return rev
 end
 function W.delete_form(key) W.sql_write('DELETE FROM start_forms WHERE key = ?', {key}) end
+-- put_run_forms writes the start form of each run with an ID from first to last (numbers), as
+-- its admission does: the run's request, a new revision each, and at. One statement for all.
+function W.put_run_forms(first, last, at)
+  local row = sql("SELECT v FROM meta WHERE k = 'rev'")[1]
+  local base = row and tonumber(row.v) or 0
+  W.sql_write("INSERT INTO meta (k, v) VALUES ('rev', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", {tostring(base + last - first + 1)})
+  local r = W.sql_write("INSERT INTO start_forms (key, rev, fingerprint, request, at) SELECT value ->> '$.request.key',"
+    .. " CAST(? + CAST(id AS INTEGER) - ? + 1 AS TEXT), 'fp', value -> '$.request', ? FROM runs"
+    .. ' WHERE CAST(id AS INTEGER) BETWEEN ? AND ?', {base, first, at, first, last})
+  assert(r.changes == last - first + 1, 'put_run_forms wrote ' .. tostring(r.changes) .. ' forms')
+end
 
 -- Switches: {state, code, message}, by the operation key of the start.
 function W.switch(key) return sql('SELECT state, code, message FROM switches WHERE start_key = ?', {key})[1] end

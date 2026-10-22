@@ -23,9 +23,9 @@ local function finished_run(i, root)
     results = {}, session_key = 'templates/' .. i .. '/session'}
 end
 -- newer writes the 200 finished runs after run id and wakes the engine with a worker change. Each
--- run has its run key, as a real start has (the engine skips a run that no run key names). The
--- newer runs are never retired here, so they get no start form (it saves 200 writes). counter:
--- the run counter to write (default: the last of the 200).
+-- run has its run key and its start form, as a real start has (the engine skips a run that no run
+-- key names; retirement needs the form). The forms were submitted an hour ago: no switch waits for
+-- them. counter: the run counter to write (default: the last of the 200).
 local function newer(a, id, counter)
   local root = W.real(W.HOME)
   local first = tonumber(id) + 1
@@ -33,6 +33,7 @@ local function newer(a, id, counter)
   for i = first, first + 199 do runs[#runs + 1] = finished_run(i, root) end
   W.put_runs(runs)
   for _, run in ipairs(runs) do W.put_run_key(run.request.key, {run_id = run.id}) end
+  W.put_run_forms(first, first + 199, os.time() - 3600)
   W.set_counter(counter or tostring(first + 199))
   S.n = S.n + 1
   local w = a:hub('hub.spawn', {profile = 'watcher', key = 'ret-wake-' .. S.n})
