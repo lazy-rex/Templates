@@ -137,9 +137,8 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 
 The plugin loads its other files from its own directory, so keep them together.
 
-Templates uses the LazyRex Plugin SDK (`"sdk": "0"` in `lazyrex.json`). It needs a hub with the
-SDK launcher and the SDK at `sdk/lua` (LazyRex 0ae7451 or later). Details: `docs/sdk-port.md`,
-"Stage 1".
+Templates uses the LazyRex Plugin SDK (`"sdk": "0"` in `lazyrex.json`). It needs LazyRex hub v0.4.1
+or later (the SDK launcher, hub.sql, and the SDK table.concat without a length limit).
 
 ## Tests
 

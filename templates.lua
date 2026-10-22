@@ -424,14 +424,6 @@ local function prior_op(keys, fingerprint)
   return result
 end
 
--- join concatenates list in blocks of 1000. Rex Lua's table.concat fails over 2559 items ("registry
--- overflow"; LazyRex docs/rex-protocol.md, observed on Rex 0.0.1792158932-g88fd41). The bytes are
--- the same as one table.concat.
-local function join(list)
-  local blocks = {}
-  for i = 1, #list, 1000 do blocks[#blocks + 1] = table.concat(list, '', i, math.min(i + 999, #list)) end
-  return table.concat(blocks)
-end
 -- canon is a canonical text of an agent's arguments for a fingerprint: type-tagged, part-framed,
 -- object keys sorted. The caller checks the types first; anything else is refused here too.
 local function canon(v)
@@ -449,7 +441,7 @@ local function canon(v)
       if count ~= n then fail('invalid_input', 'A list must not have other keys') end
       for i = 1, n do out[#out + 1] = canon(v[i]) end
       out[#out + 1] = ']'
-      return join(out)
+      return table.concat(out)
     end
     local keys = {}
     for k in pairs(v) do
@@ -460,7 +452,7 @@ local function canon(v)
     local out = {'{'}
     for _, k in ipairs(keys) do out[#out + 1] = part(k) .. canon(v[k]) end
     out[#out + 1] = '}'
-    return join(out)
+    return table.concat(out)
   end
   fail('invalid_input', 'Unsupported argument value')
 end

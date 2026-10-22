@@ -1,7 +1,8 @@
 -- The canonical text of agent arguments (templates.lua, canon) is part of each saved operation's
--- fingerprint, so its bytes must not change. Rex Lua's table.concat fails over 2559 items
--- ("registry overflow", LazyRex docs/rex-protocol.md, observed on Rex 0.0.1792158932-g88fd41), and
--- an argument object can have more entries than that within the request bound.
+-- fingerprint, so its bytes must not change. An argument object can have more than 2559 entries
+-- within the request bound. Rex Lua's table.concat fails over 2559 items ("registry overflow",
+-- LazyRex docs/rex-protocol.md, observed on Rex 0.0.1792158932-g88fd41). The plugin runs under the
+-- SDK, whose table.concat has no limit (LazyRex hub v0.4.1 or later); the test runner does not.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
