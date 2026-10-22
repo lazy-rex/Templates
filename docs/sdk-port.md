@@ -94,6 +94,30 @@ CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT N
    the SQL test helpers.
 5. Report the line count before and after.
 
+## Stage 1
+
+The coordinator split the port into two stages (2026-10-22). Stage 1 moves the registration, the
+dispatch, the views and the hub calls to the SDK. The data stays in hub.store, with the Templates
+operation replay (`hub.store.op`). Stage 2 moves the data to SQL (sections 3 and 5).
+
+- `lazyrex.json` has `"sdk": "0"`: the hub starts the plugin through the SDK launcher
+  (LazyRex 0ae7451 or later).
+- Each action and view has `{tx = false, store = false}`. With these options the SDK makes no
+  `hub.sql` call and saves no reply. `tests/sdk.lua` checks the complete call record of the plugin.
+- An adapter (`boundary`) keeps the error codes of the Templates handlers: a structured error passes
+  unchanged, and any other error is `internal`. An error of the SDK itself keeps the SDK code.
+- Changes that the SDK brings (reviewed 2026-10-22):
+  - An agent can call an export directly. The SDK identifies the agent from the requester PID
+    that Rex gives (`hub.identify`). A direct call and a forwarded call of one agent share its
+    keys. An unknown peer is refused.
+  - The SDK adds a `key` argument to each export. The read-only exports accept and ignore it.
+  - The SDK checks the schema of an export first. Some `invalid_input` messages have new text.
+    The codes and the limits stay the same.
+- Line count: 2384 before (main 8a4cfc9), 2369 after.
+
+Tested: SDK origin/sdk/lua 62dde56 at `sdk/lua` of a LazyRex checkout at 0ae7451 (the launcher;
+no `hub.sql`), with `lazyrex-hub test -lazyrex <that checkout>`.
+
 ## 6. SDK gaps (sent 2026-10-22)
 
 The coordinator reports that the SDK v0 surface covers forms and routes (`app.view`), structured

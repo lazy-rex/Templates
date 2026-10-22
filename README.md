@@ -137,6 +137,10 @@ Check this repository out next to LazyRex, and add the plugin to the hub config:
 
 The plugin loads its other files from its own directory, so keep them together.
 
+Templates uses the LazyRex Plugin SDK (`"sdk": "0"` in `lazyrex.json`). It needs a hub with the
+SDK launcher and the SDK at `sdk/lua` (LazyRex 0ae7451 or later). Details: `docs/sdk-port.md`,
+"Stage 1".
+
 ## Tests
 
 The tests are Lua files in `tests/`. `lazyrex-hub test` runs them in its own lab Rex server

@@ -3,25 +3,17 @@
 -- in the tab's layout. "Save as Template…" captures a session; "Start Session…" starts a template
 -- in any root. The engine (templates_run.lua) owns durable starts; this file owns capture, the
 -- forms, the panel and the adapter to hub.spawn_window.
-local hub_id = assert(rex.args.hub_client_id, 'hub_client_id is required')
-local instance_id = assert(rex.args.instance_id, 'instance_id is required')
+-- The Plugin SDK (LazyRex sdk/lua) registers the plugin and dispatches the hub calls. The data
+-- stays in hub.store: each action and view has {tx = false, store = false}, so the SDK makes no
+-- hub.sql call and saves no reply (docs/sdk-port.md, stage 1).
+local app = require('lazyrex').plugin('templates')
 local function fail(code, message) error({code = code, message = message}) end
 local function text(value, name)
   if type(value) ~= 'string' or value == '' or value:find('%z') then fail('invalid_input', name .. ' must be nonempty text without NUL') end
   return value
 end
 local function part(value) return tostring(#value) .. ':' .. value end
-local function hub(action, args)
-  local response, err = rex.call('client.perform', {client_id = hub_id, action = action, args = args or {}, timeout_ms = 10000})
-  if type(response) ~= 'table' or type(response.result) ~= 'table' then
-    if type(err) == 'table' then fail(err.code or 'unavailable', err.message or 'Hub request failed') end
-    -- Observed on Rex 1203 (lab): a perform error arrives as text that ends with
-    -- "(status=500 code=<code>)", for example code=not_focused.
-    local message = tostring(err or 'Invalid hub result')
-    fail(message:match('code=([%w_]+)%)$') or 'unavailable', message)
-  end
-  return response.result
-end
+local function hub(action, args) return app.hub(action, args) end
 local function rex_ok(method, args)
   local result, err = rex.call(method, args)
   if not result then fail('unavailable', type(err) == 'table' and err.message or tostring(err)) end
@@ -394,18 +386,18 @@ local function form_values(args)
   return type(args.input) == 'table' and type(args.input.values) == 'table' and args.input.values or {}
 end
 
--- Callers (agent parity). The UI user acts through views; an agent through a forwarded export
--- (hub.forward), identified by the hub from its pane. caller = {id, ids, session_id, pid}: ids
+-- Callers (agent parity). The UI user acts through views; an agent through an export, forwarded by
+-- the hub or called directly. The SDK identifies the agent from the requester PID that the hub or
+-- Rex gives (hub.identify), never from an argument. caller = {id, ids, session_id, pid}: ids
 -- are every ID of the agent (its identity and the legacy IDs it took over), so an operation
 -- recorded under an older ID still matches. An agent may act on anything that the user can
 -- (decision "Agents may act on anything", 2026-10-19): there is no owner check.
 local USER = {id = 'user', ids = {'user'}}
-local function agent_caller(pid)
-  if type(pid) ~= 'number' or pid <= 0 or pid % 1 ~= 0 then fail('refused', 'A positive requester PID is required') end
-  local r = hub('hub.identify', {pid = pid})
-  if r.found ~= true or type(r.agent) ~= 'string' or r.agent == '' then fail('refused', 'The hub does not recognize this agent') end
-  local ids = {r.agent}
-  for _, l in ipairs(type(r.legacy) == 'table' and r.legacy or {}) do
+-- caller_of turns the SDK context of an agent call (ctx.agent, ctx.aliases: the legacy IDs) into a caller.
+local function caller_of(ctx)
+  if type(ctx.agent) ~= 'string' or ctx.agent == '' then fail('refused', 'The hub does not recognize this agent') end
+  local ids = {ctx.agent}
+  for _, l in ipairs(type(ctx.aliases) == 'table' and ctx.aliases or {}) do
     if type(l) == 'string' and l ~= '' then ids[#ids + 1] = l end
   end
   -- Every ID can be part of an operation key that a run write carries (templates_run.lua, size
@@ -413,7 +405,7 @@ local function agent_caller(pid)
   for _, id in ipairs(ids) do
     if #id > run_module.MAX_ID or id:find('%c') then fail('refused', 'An ID of this agent is longer than ' .. run_module.MAX_ID .. ' bytes or has control characters') end
   end
-  return {id = r.agent, ids = ids, session_id = r.session_id, pid = pid}
+  return {id = ctx.agent, ids = ids, session_id = ctx.session_id, pid = ctx.requester_pid}
 end
 
 -- Operation keys. The UI keeps its key format: '<kind>/' .. part(view key) (part starts with a
@@ -1584,47 +1576,40 @@ local exports = {
     args = {type = 'object', properties = {run_id = {type = 'string', minLength = 1}, key = key_arg}, required = {'run_id', 'key'}, additionalProperties = false}},
 }
 
-local actions, export_names = {}, {}
+-- The exports. The SDK checks each schema and gives the agent's key as ctx.key, not in the
+-- arguments. A handler that changes something gets it back as args.key; the read-only handlers
+-- refuse a key argument (only), and the SDK accepts and ignores one.
+local MUTATIONS = {['templates.save'] = true, ['templates.start'] = true, ['templates.delete'] = true,
+  ['templates.dismiss'] = true, ['templates.retry'] = true}
+-- boundary keeps the error codes of the Templates handlers: a structured error passes unchanged,
+-- and any other error is internal (the SDK would say failed). An error of the SDK itself (a schema
+-- check, an unknown agent) keeps the SDK code.
+local function boundary(fn)
+  return function(...)
+    local ok, result = pcall(fn, ...)
+    if ok then return result end
+    if type(result) == 'table' and type(result.code) == 'string' then error(result, 0) end
+    error({code = 'internal', message = tostring(result)}, 0)
+  end
+end
+local OPTS = {tx = false, store = false}
 for _, e in ipairs(exports) do
-  export_names[#export_names + 1] = e.name
-  actions[#actions + 1] = {name = e.name, kind = 'client', title = e.title, description = e.description, args = e.args}
+  local handler, mutation = agent_handlers[e.name], MUTATIONS[e.name]
+  app.action(e.name, e.args, boundary(function(ctx, args)
+    if mutation then args.key = ctx.key end
+    return handler(caller_of(ctx), args)
+  end), {tx = false, store = false, title = e.title, description = e.description})
 end
-for _, name in ipairs({'view.render', 'view.action', 'view.seen', 'hub.changed'}) do
-  actions[#actions + 1] = {name = name, kind = 'client', title = name, args = {type = 'object', additionalProperties = true}}
-end
--- Only the hub can assert the original caller of a forwarded export.
-actions[#actions + 1] = {name = 'hub.forward', kind = 'client', title = 'Forward an agent action',
-  args = {type = 'object', properties = {action = {type = 'string'}, args = {type = 'object'}, requester_pid = {type = 'integer'}},
-    required = {'action', 'args', 'requester_pid'}, additionalProperties = false}}
-rex.call('client.keymap', {actions = actions})
-hub('hub.register', {plugin = 'templates', instance_id = instance_id, exports = export_names, commands = {
-  {id = 'start_session', title = 'Start Session…', description = 'Start a saved session template in a directory', keywords = {'template', 'workspace'}, route = '/forms/start', action = 'templates.start'},
-  {id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'},
-  {id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'},
-}})
+-- Every route of the plugin: the panel and the forms. The handlers get the raw view arguments
+-- (route, context, input, view_id, operation_key).
+app.view('/*', {
+  render = boundary(function(_, args) return render(args).tree end),
+  ['view.action'] = boundary(function(_, args) return action(args) end),
+}, OPTS)
+app.on('hub.changed', boundary(function(args) if args.what == 'workers' then wake() end end), OPTS)
+app.command({id = 'start_session', title = 'Start Session…', description = 'Start a saved session template in a directory', keywords = {'template', 'workspace'}, route = '/forms/start', action = 'templates.start'})
+app.command({id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'})
+app.command({id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'})
 invalidate = function() hub('hub.ui.invalidate', {}) end
--- Starts that a restart interrupted continue from their durable records.
-engine.resume(); pump()
-rex.on('client_perform_requested', function(ctx, ev)
-  local call_id = ev.call_id
-  local ok, result = pcall(function()
-    if not ev.requester or ev.requester.client_id ~= hub_id then fail('refused', 'Only the hub calls this plugin') end
-    local args = ev.args or {}
-    if ev.action == 'hub.forward' then
-      local handler = agent_handlers[args.action]
-      if not handler then fail('refused', 'The forwarded action is not exported') end
-      return handler(agent_caller(args.requester_pid), type(args.args) == 'table' and args.args or {})
-    end
-    if ev.action == 'view.render' then return render(args) end
-    if ev.action == 'view.action' then return action(args) end
-    if ev.action == 'hub.changed' then
-      if args.what == 'workers' then wake() end
-      return {}
-    end
-    if ev.action == 'view.seen' then return {} end
-    fail('not_supported', 'Unknown action')
-  end)
-  rex.call('client.reply', {call_id = call_id, result = ok and result or nil,
-    error = not ok and (type(result) == 'table' and result or {code = 'internal', message = tostring(result)}) or nil})
-end)
-rex.call('client.set_label', {label = 'lazyrex-plugin:templates'})
+-- Starts that a restart interrupted continue from their durable records, after the registration.
+app.start(function() engine.resume(); pump() end, {after_register = true, tx = false})

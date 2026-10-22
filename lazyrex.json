@@ -1,5 +1,6 @@
 {
  "name": "templates",
+ "sdk": "0",
  "main": "templates.lua",
  "test": {
   "agents": [

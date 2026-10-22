@@ -178,11 +178,12 @@ test('dismiss and retry: an agent acts on another agent\'s run; the run stays th
   expect(run_of(alice, b.run_id).status).to_be('dismissed')
 end)
 
-test('only the hub calls the plugin; a forward of a name that is not exported is refused', function()
+test('only the hub calls the views and forwards; an agent may call an export directly', function()
   local alice = agent('alice')
   expect_error(function() user:plugin_view('render', {route = '/panels/templates'}) end, 'refused')
   expect_error(function() alice:direct('hub.forward', {action = 'templates.list', args = {}, requester_pid = 1}) end, 'refused')
-  expect_error(function() alice:direct('templates.list', {}) end, 'refused')
+  -- The SDK identifies the agent from its PID (tests/sdk.lua).
+  expect(type(alice:direct('templates.list', {}).templates)).to_be('table')
 end)
 
 -- The reviewer's cases (2da0f11 review). A template that alice saved, started into a session that
