@@ -243,6 +243,128 @@ effect or a held revision needs it, and each guard that stays is listed here wit
 - Tested: LazyRex hub/sql-lab f413b36 with SDK eb9654d at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
   All 25 files pass (Templates a52ab11).
 
+### Slice 4: options for the table decision (decided: option A)
+
+Release 4 keeps the private tables `ops` and `start_forms` and the raw views (coordinator
+decision, 2026-10-22). Slice 4 decides whether they stay. This section compares the options. The
+facts come from Templates 59b40b5 and the SDK at 040ee9b (`lazyrex.lua`, `docs/plugin-sdk.md`,
+`docs/sql.md` sections 8 and 10). Nothing here is tested unless it says so.
+
+What each table does today:
+
+- `ops`: the saved replies of save, delete (agent and Delete confirmation), dismiss and retry,
+  under the caller's key (`<kind>/<part(key)>`, or `<kind>/agent/<part(id)><part(key)>` for each
+  ID of an agent). The kind (`save`, `delete`, ...) is part of the key, so one key can name one
+  operation of each kind. Templates checks every ID of an agent, and refuses with `conflict` when
+  two IDs saved the same key. The fingerprints are semantic:
+  - UI save: `save-v2/` + the source session ID + the submitted values in key order
+    (`values_fingerprint`).
+  - Agent save: `save-agent-v1/` + the canonical arguments (`canon`).
+  - Delete confirmation: `delete-ui-v1/` + hex + rev. Dismiss and retry: the kind + the run ID.
+
+  A reply replays without a time limit. Dismiss and retry write their reply in the same
+  transaction as the run. No `ops` row expires: there is no size limit and no eviction.
+- `run_keys`: the replay of a start. A row names the live run of a start key. When the run is
+  retired, the row stays as a marker for 30 days (`MARKER_TTL`); a replay in that time gives
+  `expired`. Then the cleanup deletes the marker (`templates_run.lua`, `expire`).
+- `start_forms`: the frozen request of a start (fingerprint, request, `at`), under the start's
+  key. It is not a reply store. A start answers `{status = 'running'}` while it waits, and the
+  hub calls again. Each call reads the frozen request. A UI poll of the Start form after a hub
+  restart gives the same run. A UI poll after the run was retired finishes with the retired
+  run's ID, with no new start and no switch. An agent replay of the same key works differently:
+  in the marker window it gives `expired`, and with changed arguments it gives
+  `operation_conflict`. A marker's `form_rev` names the form, and the switch
+  wait uses `at` (Retention). A form stays until the cleanup deletes its marker: the cleanup
+  deletes the form in the same transaction, only if the form's rev is the marker's `form_rev`. A
+  form under a legacy marker (`form_rev` NULL) is not deleted. Starts do not use `ops`.
+
+Option A: keep both tables and the raw views (the release 4 state).
+
+- Deletes nothing. Changes nothing for users or agents.
+- Costs: about 40 lines of replay code (`op_keys`, `prior_op`, `saved_op`, the `put_op` calls)
+  and the `ops` rows, which have no size limit or eviction.
+- Render dependencies: on hub 9db858f, the raw views render again after every SQL commit
+  (`main.go:456`). The SDK renders a raw view with read tracking too (`lazyrex.lua:842`:
+  `render = a.render`, as for a panel at line 839). So when the hub side of `sql.md` section 10
+  is on main (hub 4.1 or 4.2), option A gets the same render dependencies as option C. Untested:
+  the raw views also make hub and Rex calls in a render (Save captures the session); section 10
+  tracks SQL reads only.
+
+Option B: SDK saved replies (`store = true`) in place of `ops`; `start_forms` stays.
+
+- Deletes the replay code above and the `ops` table. The existing `ops` rows need an explicit
+  plan: a migration into the SDK store (an SDK or hub change), or a written policy that drops
+  them (old keys then run again once). They do not expire by themselves.
+- Changes the guarantee: a retry replays within 7 days and within the last 10 000 keys
+  (`sql.md` section 8). After that, the handler runs again. For save, a late retry saves again
+  (without `replace`, it gets the name conflict; with it, the rev guard). For delete, it deletes
+  again or gets `not_found`. For dismiss and retry, the run state decides. Decision 1 (the replay
+  window) chose no time limit; option B reopens it, and needs a new fact or a new user decision.
+- Changes the key scope: the SDK key is `a/<part(agent)><part(key)>` or `u/<part(key)>`
+  (`lazyrex.lua`, `op_key`). It has no action kind. A key that an agent used for a save and then
+  for a delete gives `operation_conflict` (another fingerprint) in place of two operations.
+- Blocker: dismiss and retry run with `tx = false` and open their own transactions. With
+  `tx = false`, the SDK commits the handler's transactions first, and then saves the reply in a
+  new transaction. A lost reply between the two commits runs the handler again: dismiss gives the
+  same result, and retry can wake the run twice. Option B cannot cover dismiss and retry until
+  the SDK saves the reply in the handler's last commit.
+- Questions to check before this option:
+  1. Legacy agent IDs: the SDK finds a reply under one of `ctx.aliases` and saves under the
+     current ID. Templates refuses two IDs with the same key (`conflict`); the SDK takes the first
+     that it finds. Is that difference acceptable?
+  2. Fingerprints: for an action, the SDK calls `opts.fingerprint(args)` before the replay check,
+     outside the handler's transaction and without `ctx` (`lazyrex.lua:812`). The agent save
+     fingerprint uses only the arguments, so it fits. For a view, the SDK computes a fixed
+     fingerprint (view ID, context, route, node, input) and has no `fingerprint` option
+     (`lazyrex.lua:849`). The UI save fingerprint uses the source session ID and the values, not
+     the view ID. Is a conflict on a resubmit from another view acceptable, or does the SDK need a
+     view fingerprint option?
+  3. The rows: see the `ops` migration above.
+
+Option C: `app.form` and `app.panel` in place of the raw views.
+
+- Gains, independent of render dependencies (option A gets those too, above):
+  - The SDK checks the field values (required, select options, unknown fields), so Templates
+    can delete its own checks.
+  - The SDK renders the standard form (Cancel, the status "Waiting for input").
+  - Less view code in Templates: the route parsing, the node building and the action dispatch.
+    Proposed, not measured: the size of this gain depends on how much of the Start and Save
+    forms needs the advanced surface (`instead`, `after`, `check = false`).
+- Costs and blockers:
+  - The routes carry values in the path (`/forms/start/<hex>`, `/forms/template/<hex>`,
+    `/forms/delete/<hex>/<rev>`). `app.form` matches a route with a query
+    (`app.route('/forms/delete', {hex, rev})`), so every route changes. A route change is
+    visible to the user: a saved view operation of an old route does not match the new one. The
+    coordinator asked to keep the old routes as redirects or aliases. Untested: whether the SDK
+    can serve an old path route (a raw `app.view` prefix route that answers `{navigate = ...}`
+    is one candidate).
+  - Replay: the hub keeps the view operations (`view_ops`), and the SDK fingerprint of a view is
+    fixed (above). The Delete confirmation today replays from `ops` with its own fingerprint
+    (`delete-ui-v1/`). A move to `app.form` must keep one replay per operation key; the plan for
+    each view must say which store replays it.
+  - The Start form switches the app once (`hub.app.select_session` with `view_id`), shows
+    "Starting…" while the run waits, and reads `start_forms` on each call. That needs `instead`,
+    `{status = 'running'}` and `ctx.view_id`, which the advanced surface has. It is the largest
+    view, and it carries the most tests (switch.lua, starting.lua, retention.lua).
+  - The Save form captures the source session at each render (hub and Rex calls). The SDK
+    refuses only writes in a render; whether `fields` may make these calls is untested.
+  - The panel has paged lists with a byte budget (views.lua, views_huge.lua). `app.ui.list`
+    must keep the same budget rules.
+- `start_forms` stays in option C: a `running` reply is never saved, so the frozen request needs
+  a table of its own either way.
+
+Decision (coordinator, 2026-10-22; vault decision "LazyRex Templates slice 4 keeps raw views and
+defers app.form, replacing the view-by-view port"): option A with the hub read tracking.
+
+- Keep the raw views and the tables `ops` and `start_forms`. The render dependencies come from the
+  hub read tracking (hub 4.1). Verify them in a lab when hub 4.1 is on main.
+- Option C is not planned. A later proposal can take one view, only if its own gains (above)
+  clearly pay for the route change.
+- Option B stays deferred: it reopens decision 1, and the `tx = false` reply gap blocks it for
+  dismiss and retry.
+- The comparison above was the input to this decision. Render dependencies do not separate A
+  from C: both get them from the hub read tracking.
+
 ## 6. SDK gaps (sent 2026-10-22)
 
 The coordinator reports that the SDK v0 surface covers forms and routes (`app.view`), structured
