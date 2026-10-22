@@ -163,7 +163,7 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   So retirement is eventual: after the bound, and then at the next try.
 - **Replay.** An agent replay of a retired key within 30 days: `expired` (same arguments) or
   `operation_conflict` (other arguments). A legacy run without a start form has a marker
-  without `form_rev`: a replay writes a new start form and gets `expired`.
+  without `form_rev`: a replay gets `expired` and writes no start form.
   A Start form operation that runs again after its run was retired (a late poll, or the operation
   again after a hub restart) gets the retired run's ID: no new run, no new session, no switch. Its
   fingerprint must match, and the marker's `form_rev` must be the rev of its start form.
@@ -259,8 +259,10 @@ replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
 
 ## Save form renders
 
-The hub renders every open view of the plugin again after each store commit, each
-`hub.ui.invalidate` and each worker change (hub `docs/hub.md`, "Snapshots and invalidation"). A
+The hub renders every open view of the plugin again after each store commit, each SQL commit
+that writes a table, each `hub.ui.invalidate` and each worker change (hub `docs/hub.md`, "Snapshots
+and invalidation"; for SQL commits: the source of LazyRex f413b36, `sqlsvc.go` calls `kickViews`
+after a commit with table marks). A
 start makes many of these, so an open Save form renders many times. Each render captures the
 source session again: per pane `hub.spawn.spec`, `terminal.process` and `terminal.pwd`, then
 `realpath` and `test -d`, and `git rev-parse` for the common root.
