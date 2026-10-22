@@ -228,7 +228,7 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
     {key = 'start-form/' .. hex(K4), value = {fingerprint = 'fp-4', request = {key = K4}}}})
   local form_rev = store('start-form/' .. hex(K2)).rev
   write({{key = 'run/' .. BIG, value = run_value(BIG, K1, 'open')},
-    {key = 'run/77', value = run_value('77', 'start/' .. part('i2-agent'), 'blocked', {grant_id = 'grant:i2'})},
+    {key = 'run/77', value = run_value('77', 'start/' .. part('i2-agent'), 'dismissed', {dismissed_from = 'blocked', grant_id = 'grant:i2'})},
     {key = 'run-counter', value = BIG},
     {key = 'run-key/' .. K1, value = {id = BIG}},
     {key = 'run-key/' .. K2, value = {id = '5', expired_at = 1000, form_rev = form_rev}},
@@ -243,7 +243,8 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
   end
   restart()
   slice2_done()
-  -- Runs: exact value, exact 32-digit ID, status = value.status.
+  -- Runs: exact value, exact 32-digit ID, status = value.status. Both runs are final (open,
+  -- dismissed), so the resumed engine does not change them before the comparison.
   expect(W.rec('run/' .. BIG).value).to_equal(store('run/' .. BIG).value)
   expect(W.rec('run/77').value).to_equal(store('run/77').value)
   expect(sql("SELECT count(*) AS n FROM runs WHERE status IS NOT value ->> '$.status'")[1].n).to_be(0)
