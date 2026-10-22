@@ -398,11 +398,11 @@ that never reaches the hub. The hub cannot see a call that did not reach it.
     definite error in `start_session`), which renders the views apart from the table set, or
     closes the form (cleared before the `done` result). Safe to opt in.
 - Save form (`/forms/save`, `save_tree`): reads no table.
-  - `capture`: Rex `session.attach`, `session.view` and `session.list_blocks`; `hub.spawn.spec`
-    for each kept pane; `pane_dir` (Rex `terminal.pwd`, the file system).
+  - `capture`: Rex `session.attach`, `session.view`, `session.list_blocks` and
+    `terminal.process`; `hub.spawn.spec` for each kept pane; `pane_dir` (Rex `terminal.pwd`, the
+    file system); `is_shell` (`SHELL`).
   - With panes, `save_fields`: `hub.profiles` (caught with `pcall`), `common_root` (git and the
-    file system), `is_shell` (`SHELL`) and `short` (`HOME`); and `session_label`
-    (`hub.session.list`).
+    file system) and `short` (`HOME`); and `session_label` (`hub.session.list`).
   - The hub calls make the render untracked, and a render that reads no table is never tracked.
     Opting in gains nothing.
 
