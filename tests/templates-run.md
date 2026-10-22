@@ -60,8 +60,9 @@ latest result. `next_tab` is the first incomplete tab. `blocked` means a call
 failed or returned an invalid result; it does not prove that no resource exists.
 
 `dismiss(id, op?)` accepts only pending, unknown, blocked or authorizing runs and sets
-`dismissed` with a revision check (`dismissed_from` keeps the earlier status). `op`, the
-plugin's operation record, commits in the same batch. Repeating it returns the same result. It preserves all
+`dismissed` (`dismissed_from` keeps the earlier status). The read of the run, the write and `op`,
+the plugin's operation record, are in one transaction with no hub call between them, so no
+revision check is needed. Repeating it returns the same result. It preserves all
 requests and results and closes no pane. A request already sent to Rex can still
 finish. A dismissed run never schedules more work, including after a restart or
 same-key admission. Dismiss is not cancellation of a Rex operation.
@@ -73,18 +74,21 @@ one scan page or one run phase and returns `(more, error)`. Schedule ticks outsi
 the action handler. Use worker events to call `wake`. No coroutine crosses a
 callback. An unknown or pending tab waits for a wake and can only be queried with
 its same key. Blocked runs retry after a wake or identical `admit`. Failed and
-closed runs do not resume. A store failure returns the error and stops scheduling
+closed runs do not resume. A write failure returns the error and stops scheduling
 that run until a wake; its last committed state remains available. A scan error
 also stops scheduling the scan. The plugin may use a delayed reconnect retry; it
 must not immediately tick again on errors.
 
-Storage keys are `run/<id>`, `run-key/<request key>`, and `run-counter`. Admission
-writes all three in one revision-checked batch. The counter produces compact
-decimal IDs without relying on floating-point integer precision. Spawn keys use
+The start records are SQL rows (`templates_sql.lua`): `runs`, `run_keys`, `start_forms`,
+`switches`, and the run counter in `meta`. Admission reads the run key and the start form again,
+then writes the start form, the run key, the counter and the run in one transaction. A refused
+commit leaves none of them. A step that calls the hub between its read and its write (a pane
+creation, a session check) writes over the run's `ver`, the write count that its read gave. The
+counter produces compact decimal IDs without relying on floating-point integer precision. Spawn keys use
 `templates/<id>/tab/<n>` because user-context hub keys are shared across plugins.
 
 `retry(id, op)` queues a blocked, pending or unknown run again. The queued state and `op` (with
-`result = {run_id, woken}`) commit in one batch, so a lost reply loses no retry. Another status
+`result = {run_id, woken}`) commit in one transaction, so a lost reply loses no retry. Another status
 gives `woken = false`: it keeps the run unchanged and records the operation result. `wake_one(id)` schedules one queued or starting run
 (a replayed retry). Dismiss and retry come from the user or any agent (decision "Agents may act on
 anything", 2026-10-19); the run keeps its `by` and its grant.
@@ -140,44 +144,45 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   eligible run IDs in memory. The first full scan after a plugin start builds the list. After that,
   a run joins when its final state commits with nothing owed, or when its revoke succeeds. So the
   201st eligible run retires the oldest one without a separate wake.
-- **Batch.** The engine reads `run/<id>`, `run-key/<key>`, `start-form/<hex key>` and
-  `switch/<hex key>` fresh. It retires the run only if the run is still eligible and `run-key/<key>`
-  names it. Then one batch, with `if_rev` on each record: delete `run/<id>`; write the marker
-  `run-key/<key>` = `{id, expired_at, form_rev}`; delete the switch record if it exists. The batch
-  is under 4 KiB with the largest keys (an engine case measures it). The `start-form` record is
-  not changed. `form_rev` is its rev at the fresh read. Templates writes that record only when it
-  is absent, or after its marker expired, so it cannot change while `run-key/<key>` names the live
-  run. This holds for the writers of Templates, not for another writer of the store. Hub revisions
-  never reset (`hub/cmd/hub/store.go`, `nextRev`).
+- **Transaction.** One transaction reads the run, its run key, its start form and its switch row.
+  It retires the run only if the run is still eligible and the run key names it. Then it deletes
+  the run, replaces the run key with the marker `{run_id, expired_at, form_rev}`, and deletes the
+  switch row if it exists. The start form is not changed. `form_rev` is its rev at that read.
+  Templates writes the start form only when it is absent, or after its marker expired, so it
+  cannot change while the run key names the live run. A form rev is unique: `meta` `rev` gives new
+  revisions above every imported hub.store revision (the import floors in `templates_sql.lua`).
+  `tests/engine.lua` retires a run with the largest operation key.
 - **Switch wait.** A user start into a new session has a Start form that switches the app once
   (`switch_app`). The form stays open until that decision. Its run is retired only when the switch
-  record has a final state (`done`, `refused` or `unknown`), or when the `start-form` record is at
+  row has a final state (`done`, `refused` or `unknown`), or when the start form is at
   least `switch_wait` + 60 s old (the form was closed, or the decision was lost). A missing or
-  `attempted` switch record waits for that bound. A `start-form` record without a valid `at` is from
+  `attempted` switch row waits for that bound. A start form without a valid `at` is from
   before the switch: it never switches, so its run is retirable. Agent starts and starts into an
   existing session never switch. A step that must wait is tried again 60 s later, by its timer
   (`switch_settled` in `templates_run.lua`; the plugin gives it as the engine option `retirable`).
   So retirement is eventual: after the bound, and then at the next try.
 - **Replay.** An agent replay of a retired key within 30 days: `expired` (same arguments) or
-  `operation_conflict` (other arguments). A legacy run without a `start-form` record has a marker
-  without `form_rev`: a replay writes a new record and gets `expired`.
+  `operation_conflict` (other arguments). A legacy run without a start form has a marker
+  without `form_rev`: a replay writes a new start form and gets `expired`.
   A Start form operation that runs again after its run was retired (a late poll, or the operation
   again after a hub restart) gets the retired run's ID: no new run, no new session, no switch. Its
-  fingerprint must match, and the marker's `form_rev` must be the rev of its `start-form` record.
+  fingerprint must match, and the marker's `form_rev` must be the rev of its start form.
   The 60 s bound is a policy delay, not proof that every poll ended: this replay rule makes a late
   poll safe. Only the user path has it; an agent replay gets `expired`.
 - **Expiry.** A marker expires 30 days after `expired_at` (`now - expired_at >= 30 * 86400`). The
   check is on each use, before the fingerprint check: in the agent's alias lookup, in `start_core`
-  and in `engine.admit`. A `start-form` record counts as absent only when its marker has expired
-  and `form_rev` equals its rev. Then the new start replaces both records (`if_rev`). A legacy
-  marker never frees a later record: after 30 days that record decides the fingerprint.
-- **Cleanup.** After the first full scan and then every 24 hours, the engine scans `run-key/` and
-  queues each expired marker. Each step reads both records fresh and deletes the marker only if it
-  is the one the scan saw (`id`, `expired_at`, `form_rev`) and has expired. It deletes the
-  `start-form` record only if that record has rev `form_rev`. A reused key keeps its new records.
+  and in `engine.admit`. A start form counts as absent only when its marker has expired
+  and `form_rev` equals its rev. Then the new start replaces the form and the run key in the
+  admission transaction, which reads both again. A legacy marker never frees a later start form:
+  after 30 days that form decides the fingerprint.
+- **Cleanup.** After the first full scan and then every 24 hours, the engine reads a page of
+  expired markers (`expired_markers`) and queues each one. Each step reads both rows again in one
+  transaction and deletes the marker only if it is the one the page gave (`run_id`, `expired_at`,
+  `form_rev`) and has expired. It deletes the start form only if that form has rev `form_rev`. A
+  reused key keeps its new rows.
 - **Maintenance.** A tick does its run work first, then at most one maintenance step (a
-  retirement, a cleanup scan page or a cleanup batch). A tick that read a run-scan page does none:
-  one store scan per tick. A failed step waits 60 s. One timer wakes the pump for the earliest
+  retirement, a cleanup page or a cleanup step). A tick that read a page of runs does none:
+  one page read per tick. A failed step waits 60 s. One timer wakes the pump for the earliest
   step that is not due yet. Each tick sets it again, also a tick that read a scan page: a timer
   for an earlier step can supersede it. A newer timer for an earlier time supersedes an older
   callback (a generation number: `rex.after` has no cancel).
@@ -320,9 +325,11 @@ Tests: `tests/titles.lua` (observed on Rex 0.0.1792158932-g88fd41 with LazyRex 0
 
 ## Size bounds
 
-One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The
-engine writes a run record whole in one `hub.store.batch`, and the record grows after admission.
-Every field that a later write adds has a bound:
+One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). A run
+is an SQL row. Its value is a JSON parameter, which is encoded once more, so the row writer
+(`write_text` in `templates_sql.lua`) writes a long value in chunks of at most `FRAME_MAX` (60 KiB)
+per statement, in one transaction. The bound of the record stays `MAX_RUN` (61 KiB as encoded
+JSON), and the record grows after admission. Every field that a later write adds has a bound:
 
 | Field | Bound | Longer value |
 | --- | --- | --- |
@@ -342,12 +349,18 @@ encodes `<`, `>` and `&` as 6 bytes, as the hub does, and a malformed byte as U+
 
 Admission builds the record at its final size with these bounds (every tab request and result,
 the IDs and an error at their maximum) and measures it with `rex.json.encode`. It refuses a run
-over 61 KiB with `invalid_input` ("too large to start") and writes nothing then. The other 3 KiB
-is the envelope of the largest run write, about 2.5 KB as encoded JSON: the `client.perform`
-frame, the record op (`run/<id>`, `if_rev`), and the operation that dismiss or retry commits with
-the record. Its key holds an agent ID and a key that can be all `<` (6 bytes each), so it is up
-to 1 992 bytes. `tests/engine.lua` measures the largest admitted run in every write (admission, a
-state change, dismiss, retry) with a 32-digit run ID and the worst agent ID and key.
+over 61 KiB with `invalid_input` ("too large to start") and writes nothing then.
+`tests/engine.lua` measures the largest admitted run at its final size with a 32-digit run ID.
+The row writer measures each statement as its complete frame (client ID, action, SQL text, every
+parameter, the transaction token), so the frame limit does not depend on the record bound. As a
+parameter, a value of at most `MAX_RUN` is at most twice that size, so at most 3 chunks.
+`tests/sql_runs.lua` opens a run that is over the frame limit as a parameter.
+
+Admission is the largest transaction: at most 15 `hub.sql` calls (3 reads; the start form, the
+run key, the counter and the run, with their chunks) and no other hub call. The hub ends a
+transaction 5 s after its last call or 10 s after its start (LazyRex `docs/sql.md`). The count
+bounds the calls, not their time: on a slow host the commit can fail with `tx_expired`, and then
+nothing is committed (`tests/sql_runs.lua` refuses the commit to check that state).
 
 The bound applies to new admissions. A run that an older version admitted, larger than 61 KiB,
 is not changed: its same-key admission still returns it (no size check comes first), and another
@@ -393,10 +406,9 @@ fixed part plus the sum of J of the variable strings. (b) is a separate conditio
 does not imply it, because a relative symlink can resolve to another suffix at another root.
 
 A start that breaks a condition can still get "too large to start" at admission. That refusal
-makes no run, no session and no run-counter change. `start_core` writes the `start-form` record
-before admission, so the frozen record stays. It keeps the request, not the refusal: a retry with
-the same key compiles that request again, so it gets the same refusal unless the resolved
-directories changed in the meantime. Another request with that key gets `operation_conflict`.
+makes no run, no session, no run-counter change and no start form: admission writes the start
+form in its own transaction. A retry with the same key compiles its request again, so it gets the
+same refusal unless the resolved directories changed in the meantime.
 Records that exist already, or a template written by another writer, are not checked at save;
 admission still applies. Tests: `tests/save_size.lua` and the measure cases in `tests/engine.lua`.
 

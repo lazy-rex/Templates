@@ -33,7 +33,10 @@ Size before: `templates.lua` 1613 lines, `templates_run.lua` 754 lines (2367); t
 
 ## 3. Data: hub.store to SQL
 
-Schema (version 1):
+This section is the plan. The schema that Templates uses is in `templates_sql.lua` (`SCHEMA`,
+migration 1; `SCHEMA_2`, migration 2). "Stage 2" below gives the changes from this plan.
+
+Schema (planned):
 
 ```sql
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);          -- rev counter, run counter, import state
@@ -179,6 +182,66 @@ effect or a held revision needs it, and each guard that stays is listed here wit
   All 24 files pass (Templates 8dc229b). SDK eb9654d: a render reads without a transaction, and a
   write in a render fails. No Templates render writes (the reviewer checked the render paths; the suite
   passes with this refusal).
+
+### Slice 2: the start records, and the dismiss and retry operations
+
+- Tables (migration 2, `SCHEMA_2`): `runs`, `run_keys`, `start_forms`, `switches`; the run counter
+  is `meta` `run-counter`. The operations of dismiss and retry go to `ops`. After the import,
+  Templates makes no hub.store call (`tests/sdk.lua` checks the complete call record).
+- Release 4 keeps the private `ops` and `start_forms` tables, and the plugin keeps its raw views
+  (coordinator decision, 2026-10-22). The removal of these tables is decided at slice 4.
+- Store records and their rows:
+
+  | hub.store record | SQL row |
+  | --- | --- |
+  | `run/<id>` `{rev, value}` | `runs (id, ver, status, value)`: `value` is the record value as JSON text, `status` a copy of `value.status`, `ver` a write count that starts at 1. |
+  | `run-counter` (decimal text) | `meta` `run-counter` |
+  | `run-key/<key>` `{id}` | `run_keys (key, run_id)`, `expired_at` and `form_rev` NULL: the key names its live run. |
+  | `run-key/<key>` `{id, expired_at, form_rev?}` | `run_keys` with `expired_at`; `form_rev` NULL in a legacy marker. |
+  | `start-form/<hex key>` `{fingerprint, request, at?}` | `start_forms (key, rev, fingerprint, request, at)`: the key is the operation key (not hex), `rev` is the store rev, `at` NULL in a legacy form. |
+  | `switch/<hex key>` `{state, code?, message?}` | `switches (start_key, state, code, message)` |
+  | dismiss and retry operations (`hub.store.ops_scan`) | `ops`, key, fingerprint and result unchanged |
+
+- Import: the steps run in this order, each with its own cursor and done flag in `meta`, so a step
+  that a slice 1 import completed does not run again: `template/`, the save and delete
+  operations, `import/floor-2` (the revision floor again, above every store rev), the counter,
+  `run/`, `run-key/`, `start-form/`, `switch/`, the dismiss and retry operations. A record of a
+  shape that Templates did not write refuses the import: the start fails with its key and the
+  reason, nothing of that record commits, and the hub starts the plugin again.
+- Transactions: admission writes the start form, the run key, the counter and the run in one
+  transaction. It reads the run key and the start form again in that transaction: another
+  writer that changed them after the first read gives `conflict`. Dismiss, authorize and retry
+  read the run and write it with their operation in one transaction. Retire and expire use one
+  transaction each.
+- Revision guards that stay:
+  - `runs.ver`: a step that calls the hub between its read and its write (a pane creation, a
+    session check, a grant) writes over the ver that its read gave. Another write wins: the step
+    gets `conflict`, and the next wake continues.
+  - `start_forms.rev`: a marker's `form_rev` names the form of a retired run.
+- Behavior changes:
+  - A refused admission (for example "too large to start") leaves no start form. Before, the
+    form stayed.
+  - The test writer (`W.sql_write`) retries `busy` for up to 5 s: a test write fails at once
+    while the plugin holds a transaction.
+- Reads: the engine pages its runs (`run_summaries`, SCAN_LIMIT) and the expired markers with
+  `app.db.each`. The panel and the run page use SQL queries and counts; the full store scans are
+  deleted. A render makes no write.
+- Size: a run row is written in chunks (`write_text`); its record bound stays `MAX_RUN`.
+  Admission is the largest transaction: at most 15 `hub.sql` calls (`tests/templates-run.md`,
+  "Size bounds").
+- Rollback: the store records stay as they were before the import. They are a snapshot from
+  before the cutover: a run, key, form or operation that SQL got after the import is not in them.
+  So `hub.admin.sql_return` to a store version is not lossless: it loses those writes. A safe
+  rollback needs the coordinated backup of section 3.
+- Tests: `tests/sql_runs.lua` (a lost and a refused admission commit, a lost dismiss reply, a run
+  over the frame limit as a parameter, a failed append in a chunked run update, status =
+  value.status); `tests/import.lua` (every slice 2 shape after a completed slice 1 import, an
+  unsupported record); `tests/switch.lua` (a lost final switch reply); engine cases (the
+  admission re-checks: a run key or start form that changes while prepare calls the hub).
+  Limit: the admission re-checks are tested only in engine cases. Rex Lua runs one handler at a
+  time, so the lab cannot interleave two handlers there, and the test hub has no SQL delay fault.
+- Tested: LazyRex hub/sql-lab f413b36 with SDK eb9654d at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
+  All 25 files pass (Templates a52ab11).
 
 ## 6. SDK gaps (sent 2026-10-22)
 
