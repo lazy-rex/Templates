@@ -6,21 +6,19 @@ local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local BUDGET = 40 * 1024
 
 -- runs writes finished runs with the IDs from first to last, each with a root of root_len bytes
--- and an error of err_len bytes, in writes of at most 40 KB (a runner request is at most 64 KiB).
+-- and an error of err_len bytes.
 local function runs(first, last, root_len, err_len)
   local root = '/' .. string.rep('r', root_len - 1)
-  local ops, size = {}, 0
+  local list = {}
   for i = first, last do
     local run = {id = tostring(i), status = 'open', next_tab = 2, root = root,
       tabs = {{key = 'templates/' .. i .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
       request = {key = 'out' .. i, root = root, new_session_name = 'out' .. i, template = {v = 1, name = 'out' .. i, tabs = {}}},
       results = {}, session_key = 'templates/' .. i .. '/session'}
     if err_len then run.error = string.rep('e', err_len) end
-    local n = #rex.json.encode(run)
-    if #ops > 0 and size + n > 40000 then W.twrite(ops); ops, size = {}, 0 end
-    ops[#ops + 1], size = {key = 'run/' .. i, value = run}, size + n
+    list[#list + 1] = run
   end
-  if #ops > 0 then W.twrite(ops) end
+  W.put_runs(list)
 end
 
 -- pages reads every page of templates.runs with this limit and returns the IDs in reply order and
@@ -91,7 +89,7 @@ test('templates.runs gives an empty page after the oldest run, and accepts a rem
   local last = a:call('templates.runs', {before = '1001'})
   expect(#last.runs).to_be(0)
   expect(last.next_before).to_be(nil)
-  W.twrite({{key = 'run/1250', delete = true}})
+  W.delete_run('1250')
   local page = a:call('templates.runs', {before = '1250', limit = 3})
   expect(page.runs[1].id).to_be('1249')
   expect(page.next_before).to_be('1247')
@@ -115,10 +113,10 @@ end)
 test('a run view over the budget is refused explicitly, and the next page skips it', function()
   local a = agent('alice')
   -- The long root is only in run.root (the view shows it), so the record fits one write.
-  W.twrite({{key = 'run/9000', value = {id = '9000', status = 'open', next_tab = 2, root = '/' .. string.rep('r', 45000),
+  W.put_runs({{id = '9000', status = 'open', next_tab = 2, root = '/' .. string.rep('r', 45000),
     tabs = {{key = 'templates/9000/tab/1', title = 'x', layout = {shell = true, cwd = '/'}}},
     request = {key = 'out9000', root = '/', new_session_name = 'out9000', template = {v = 1, name = 'out9000', tabs = {}}},
-    results = {}, session_key = 'templates/9000/session'}}})
+    results = {}, session_key = 'templates/9000/session'}})
   local err = expect_error(function() a:call('templates.runs', {}) end, 'too_large')
   expect(tostring(err.message)).to_match('before = "9000"')
   expect(a:call('templates.runs', {before = '9000', limit = 1}).runs[1].id).to_be('5060')

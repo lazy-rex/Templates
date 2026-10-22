@@ -53,8 +53,8 @@ end)
 
 test('a direct call and a forwarded call of one agent share its keys; an unknown peer is refused', function()
   local alice = agent('alice')
-  W.twrite({{key = 'template/' .. W.hex('sdk-d'), value = {v = 1, name = 'sdk-d', saved_by = 'user',
-    tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  W.put_template(W.hex('sdk-d'), {v = 1, name = 'sdk-d', saved_by = 'user',
+    tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
   local first = alice:direct('templates.delete', {template = 'sdk-d', key = 'sdk-d1'})
   -- The template is gone, so only a replay of the direct call's result can answer the forward.
   expect(alice:call('templates.delete', {template = 'sdk-d', key = 'sdk-d1'})).to_equal(first)

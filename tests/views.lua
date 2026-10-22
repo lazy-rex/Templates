@@ -9,20 +9,18 @@ local function size(tree) return #rex.json.encode({tree = tree}) end
 
 local function finished(status) return status == 'open' or status == 'failed' or status == 'closed' or status == 'dismissed' end
 -- seed writes runs with the IDs from first to last and this status, each with an error of err_len
--- bytes, in writes of at most 40 KB (a runner request is at most 64 KiB).
+-- bytes.
 local function seed(first, last, status, err_len)
   local root = W.real(W.HOME)
-  local ops, n = {}, 0
+  local runs = {}
   for i = first, last do
     local run = {id = tostring(i), status = status, next_tab = 1, root = root,
       tabs = {{key = 'templates/' .. i .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
       request = {key = 'view' .. i, root = root, session_id = 'session:none', template = {v = 1, name = 'view' .. i, tabs = {}}},
       results = {}, session_key = 'templates/' .. i .. '/session', error = string.rep('e', err_len or 0)}
-    local cost = #rex.json.encode(run)
-    if #ops > 0 and n + cost > 40000 then W.twrite(ops); ops, n = {}, 0 end
-    ops[#ops + 1], n = {key = 'run/' .. i, value = run}, n + cost
+    runs[#runs + 1] = run
   end
-  if #ops > 0 then W.twrite(ops) end
+  W.put_runs(runs)
 end
 local function count(n, one, many) return n .. ' ' .. (n == 1 and one or many) end
 -- check_panel checks the size, the pairs of rows of each blocked start, and the exact hidden
@@ -119,15 +117,11 @@ end)
 test('the Start form opens with 300 long template names; the default is the first shown option', function()
   local a = agent('alice')
   local s = W.workspace()
-  local ops, n = {}, 0
   for i = 1, 300 do
     local name = string.format('%03d', i) .. string.rep('<', 57)
     local value = {v = 1, name = name, saved_by = 'user', tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}}
-    local cost = #rex.json.encode(value) + 200
-    if #ops > 0 and n + cost > 40000 then W.twrite(ops); ops, n = {}, 0 end
-    ops[#ops + 1], n = {key = 'template/' .. W.hex(name), value = value}, n + cost
+    W.put_template(W.hex(name), value)
   end
-  W.twrite(ops)
   local tree = W.open('start_session', '/forms/start', s):render()
   expect(size(tree) <= BUDGET).to_be(true)
   local field = W.field(tree, 'start_session', 'template')

@@ -118,7 +118,7 @@ test('lab 4 a crash inside a tab create: the run waits pending with its candidat
   expect(W.find(stuck, 'id', 'dismiss:' .. id)).not_to_be(nil)
   expect(p:action('stuck', 'dismiss', {item_id = 'dismiss:' .. id}, 'lab4-dismiss').status).to_be('succeeded')
   expect(W.run_of(alice, id).status).to_be('dismissed')
-  expect(W.template('crash-create')).not_to_be(nil)
+  expect(W.template(W.hex('crash-create'))).not_to_be(nil)
   expect(spawn_blocks(N)).to_equal(panes)
   expect(window_ids(N)).to_equal(windows)
   -- The original Start again after Dismiss. The first form is gone: after the restart, the
@@ -145,8 +145,8 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   local r = alice:call('templates.start', {template = 'crash-agent', root = root, key = 'restart-agent'})
   expect(r.run_id).to_be(id)
   held()
-  expect(W.rec('run/' .. id).value.status).to_be('queued')
-  expect(type(W.rec('run/' .. id).value.grant_id)).to_be('string')
+  expect(W.run(id).value.status).to_be('queued')
+  expect(type(W.run(id).value.grant_id)).to_be('string')
   hub:restart()
   local run = W.wait_run(alice, id, 'open')
   local panes = workers_in(alice, run.session_id)
@@ -155,7 +155,7 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   -- Any agent stops a pane (decision "Agents may act on anything", 2026-10-19); the pane stays alice's.
   expect(bob:hub('hub.stop', {spawn_id = panes[1].spawn_id}).status).to_be('closed')
   expect(alice:hub('hub.stop', {spawn_id = panes[2].spawn_id}).status).to_be('closed')
-  wait('the revoke of the grant', function() return W.rec('run/' .. id).value.grant_revoked == true end, 20)
+  wait('the revoke of the grant', function() return W.run(id).value.grant_revoked == true end, 20)
 end)
 
 -- A constructed recovery boundary, not an observed live migration. alice reports a conversation,
@@ -171,16 +171,16 @@ test('constructed boundary: a run with a legacy owner and no recorded grant resu
   local id, held = hold(1)
   local r = alice:call('templates.start', {template = 'legacy-owner', root = root, key = 'legacy-start'})
   held()
-  local run = W.rec('run/' .. id).value
+  local run = W.run(id).value
   expect(run.request.by).to_be(current)
   local grant_id = run.grant_id
   expect(type(grant_id)).to_be('string')
   run.grant_id, run.status, run.request.by = nil, 'authorizing', 'alice'
-  W.twrite({{key = 'run/' .. id, value = run}})
+  W.put_runs({run})
   hub:restart({crash = true})
   local opened = W.wait_run(alice, r.run_id, 'open')
-  expect(W.rec('run/' .. id).value.grant_id).to_be(grant_id)
-  expect(W.rec('run/' .. id).value.request.by).to_be('alice')
+  expect(W.run(id).value.grant_id).to_be(grant_id)
+  expect(W.run(id).value.request.by).to_be('alice')
   local panes = workers_in(alice, opened.session_id)
   expect(#panes).to_be(3)
   for _, w in ipairs(panes) do expect(w.parent).to_be(current) end

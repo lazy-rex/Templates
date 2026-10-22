@@ -1,5 +1,5 @@
 -- Shared helpers of the Templates tests (load_fixture): lab directories and sessions, forms, the
--- panel, runs and the plugin's store keys.
+-- panel, runs and the rows of the plugin.
 local W = {}
 -- W.sql_write runs sql_write as another writer would. The test writer fails at once with busy
 -- while the plugin has an open transaction; a plugin call there waits for it (at most 5 s, LazyRex
@@ -135,10 +135,9 @@ function W.wait_run(a, id, status)
     return r and r.status == status and r or nil
   end, 30)
 end
--- next_run_id is the ID that the next admitted run gets (the run counter + 1; small numbers only).
-function W.next_run_id() return tostring((tonumber(W.rec('run-counter').value) or 0) + 1) end
--- unhex: the text of a lowercase hex string.
-local function unhex(s) return (s:gsub('..', function(h) return string.char(tonumber(h, 16)) end)) end
+-- Rows of the plugin (templates_sql.lua). A test reads and writes them as another writer would.
+-- Each reader returns the row, or nil when it is absent. Keys are the table keys: a run ID, an
+-- operation key (W.start_key, W.agent_start_key), a template hex.
 -- text reads one text column of one row in parts (a test client reply has a size limit), or nil.
 local PART = 6000 -- characters; a character is at most 4 bytes, and the reply encodes it again
 local function text(tbl, col, kcol, key)
@@ -149,39 +148,6 @@ local function text(tbl, col, kcol, key)
     parts[#parts + 1] = sql('SELECT substr(' .. col .. ', ?, ?) AS p FROM ' .. tbl .. ' WHERE ' .. kcol .. ' = ?', {pos, PART, key})[1].p
   end
   return table.concat(parts)
-end
--- Records of the start engine (templates_sql.lua). W.rec(key) reads the SQL row of an old store
--- key in the old record shape {rev, value} ({} when absent): 'run/<id>' (rev is the run's ver),
--- 'run-key/<key>' ({id, expired_at, form_rev}), 'run-counter', 'start-form/<hex key>' ({fingerprint,
--- request, at}) and 'switch/<hex key>' ({state, code, message}). A 'template/' key reads W.trow;
--- another key reads the store.
-function W.rec(key)
-  local function prefix(p) return key:sub(1, #p) == p and key:sub(#p + 1) or nil end
-  local id, k, f, s = prefix('run/'), prefix('run-key/'), prefix('start-form/'), prefix('switch/')
-  if id then
-    local r = sql('SELECT CAST(ver AS TEXT) AS rev FROM runs WHERE id = ?', {id})[1]
-    if not r then return {} end
-    return {rev = r.rev, value = rex.json.decode(text('runs', 'value', 'id', id))}
-  elseif k then
-    local r = sql('SELECT run_id, expired_at, form_rev FROM run_keys WHERE key = ?', {k})[1]
-    if not r then return {} end
-    return {value = {id = r.run_id, expired_at = r.expired_at, form_rev = r.form_rev}}
-  elseif key == 'run-counter' then
-    local r = sql("SELECT v FROM meta WHERE k = 'run-counter'")[1]
-    return r and {value = r.v} or {}
-  elseif f then
-    local fk = unhex(f)
-    local r = sql('SELECT rev, at FROM start_forms WHERE key = ?', {fk})[1]
-    if not r then return {} end
-    return {rev = r.rev, value = {fingerprint = text('start_forms', 'fingerprint', 'key', fk),
-      request = rex.json.decode(text('start_forms', 'request', 'key', fk)), at = r.at}}
-  elseif s then
-    local r = sql('SELECT state, code, message FROM switches WHERE start_key = ?', {unhex(s)})[1]
-    return r and {value = {state = r.state, code = r.code, message = r.message}} or {}
-  elseif key:sub(1, #'template/') == 'template/' then
-    return W.trow(key)
-  end
-  return store(key)
 end
 -- stage writes text to the staging row meta 'test-stage' in parts; the caller's next statement
 -- reads it whole (the plugin never reads a partial value).
@@ -195,129 +161,128 @@ local function stage(text)
     pos = pos + n
   end
 end
+local function unstage() W.sql_write("DELETE FROM meta WHERE k = 'test-stage'") end
 local NULL = {null = true}
+local function null(v) if v == nil then return NULL end return v end
+-- new_rev takes a revision from the plugin's counter (meta 'rev'), as a plugin write does.
 local function new_rev()
   local rev = tonumber(sql("SELECT v FROM meta WHERE k = 'rev'")[1].v) + 1
   W.sql_write("UPDATE meta SET v = ? WHERE k = 'rev'", {tostring(rev)})
   return tostring(rev)
 end
--- write_rec writes one op of an engine record as another writer would (W.twrite). It returns
--- false for a key of another kind.
+
+-- The operation key of a UI start with key, and of an agent's start.
+function W.start_key(key) return 'start/' .. W.part(key) end
+function W.agent_start_key(agent_id, key) return 'start/agent/' .. W.part(agent_id) .. W.part(key) end
+
+-- Runs: {ver, status, value}. W.put_runs writes whole run values (an existing run gets ver + 1);
+-- small values share one statement.
+function W.run(id)
+  local r = sql('SELECT ver, status FROM runs WHERE id = ?', {id})[1]
+  if not r then return nil end
+  return {ver = r.ver, status = r.status, value = rex.json.decode(text('runs', 'value', 'id', id))}
+end
 local SMALL = 12000 -- a run value of at most this many bytes goes in one statement with others
-local pending = {}
-local function flush()
-  if #pending == 0 then return end
+local UPSERT_RUN = ' ON CONFLICT (id) DO UPDATE SET ver = runs.ver + 1, status = excluded.status, value = excluded.value'
+-- insert_runs writes a batch of small runs in one statement. It is not a closure over the batch: in
+-- Rex Lua, an error that pcall catches (a busy retry of W.sql_write) detaches a closure's upvalues
+-- from the locals of an active caller, so a closure could not reset a caller's batch.
+local function insert_runs(batch)
+  if #batch == 0 then return end
   local marks, params = {}, {}
-  for i, run in ipairs(pending) do
+  for i, run in ipairs(batch) do
     marks[i] = '(?, 1, ?, ?)'
-    params[#params + 1], params[#params + 2], params[#params + 3] = run.id, run.status, run.text
+    params[#params + 1] = run.id
+    params[#params + 1] = run.status
+    params[#params + 1] = run.text
   end
-  W.sql_write('INSERT INTO runs (id, ver, status, value) VALUES ' .. table.concat(marks, ', ')
-    .. ' ON CONFLICT (id) DO UPDATE SET ver = runs.ver + 1, status = excluded.status, value = excluded.value', params)
-  pending = {}
+  W.sql_write('INSERT INTO runs (id, ver, status, value) VALUES ' .. table.concat(marks, ', ') .. UPSERT_RUN, params)
 end
-local function write_rec(op)
-  local function prefix(p) return op.key:sub(1, #p) == p and op.key:sub(#p + 1) or nil end
-  local id, k, f, s = prefix('run/'), prefix('run-key/'), prefix('start-form/'), prefix('switch/')
-  if id then
-    if op.delete then flush(); W.sql_write('DELETE FROM runs WHERE id = ?', {id}) return true end
-    local t = rex.json.encode(op.value)
-    local status = type(op.value) == 'table' and type(op.value.status) == 'string' and op.value.status or ''
+function W.put_runs(runs)
+  local batch = {}
+  for _, run in ipairs(runs) do
+    local t = rex.json.encode(run)
+    local status = type(run.status) == 'string' and run.status or ''
     if #t <= SMALL then
-      pending[#pending + 1] = {id = id, status = status, text = t}
-      if #pending * SMALL >= 40000 then flush() end
-      return true
-    end
-    flush()
-    stage(t)
-    W.sql_write("INSERT INTO runs (id, ver, status, value) SELECT ?, 1, ?, v FROM meta WHERE k = 'test-stage'"
-      .. ' ON CONFLICT (id) DO UPDATE SET ver = runs.ver + 1, status = excluded.status, value = excluded.value', {id, status})
-    W.sql_write("DELETE FROM meta WHERE k = 'test-stage'")
-    return true
-  end
-  flush()
-  if k then
-    if op.delete then W.sql_write('DELETE FROM run_keys WHERE key = ?', {k}) return true end
-    local v = op.value
-    W.sql_write('INSERT INTO run_keys (key, run_id, expired_at, form_rev) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE'
-      .. ' SET run_id = excluded.run_id, expired_at = excluded.expired_at, form_rev = excluded.form_rev',
-      {k, v.id, v.expired_at or NULL, v.form_rev or NULL})
-    return true
-  elseif op.key == 'run-counter' then
-    if op.delete then W.sql_write("DELETE FROM meta WHERE k = 'run-counter'") return true end
-    W.sql_write("INSERT INTO meta (k, v) VALUES ('run-counter', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", {op.value})
-    return true
-  elseif f then
-    local fk = unhex(f)
-    if op.delete then W.sql_write('DELETE FROM start_forms WHERE key = ?', {fk}) return true end
-    local v = op.value
-    stage(rex.json.encode(v.request))
-    W.sql_write("INSERT INTO start_forms (key, rev, fingerprint, request, at) SELECT ?, ?, ?, v, ? FROM meta WHERE k = 'test-stage'"
-      .. ' ON CONFLICT (key) DO UPDATE SET rev = excluded.rev, fingerprint = excluded.fingerprint, request = excluded.request, at = excluded.at',
-      {fk, new_rev(), v.fingerprint, v.at or NULL})
-    W.sql_write("DELETE FROM meta WHERE k = 'test-stage'")
-    return true
-  elseif s then
-    if op.delete then W.sql_write('DELETE FROM switches WHERE start_key = ?', {unhex(s)}) return true end
-    local v = op.value
-    W.sql_write('INSERT INTO switches (start_key, state, code, message) VALUES (?, ?, ?, ?) ON CONFLICT (start_key) DO UPDATE'
-      .. ' SET state = excluded.state, code = excluded.code, message = excluded.message', {unhex(s), v.state, v.code or NULL, v.message or NULL})
-    return true
-  end
-  return false
-end
--- Template rows (templates_sql.lua). A test reads and writes them as another writer would, with
--- the old record shapes: W.trow(key) is like store(key) for a key 'template/<hex>' ({rev, value},
--- or {} when absent), and W.twrite(ops) is like write(ops): a 'template/' op goes to the SQL row
--- (with a new revision from the plugin's counter), an engine record op to its row (write_rec),
--- any other op to the store.
-function W.trow(key)
-  local row = sql('SELECT CAST(rev AS TEXT) AS rev, value FROM templates WHERE hex = ?', {key:sub(#'template/' + 1)})[1]
-  if not row then return {} end
-  return {rev = row.rev, value = rex.json.decode(row.value)}
-end
-function W.twrite(ops)
-  local rest = {}
-  for _, op in ipairs(ops) do
-    if op.key:sub(1, #'template/') == 'template/' then
-      flush()
-      local hx = op.key:sub(#'template/' + 1)
-      if op.delete then
-        W.sql_write('DELETE FROM templates WHERE hex = ?', {hx})
-      else
-        local rev = tonumber(sql("SELECT v FROM meta WHERE k = 'rev'")[1].v) + 1
-        W.sql_write("UPDATE meta SET v = ? WHERE k = 'rev'", {tostring(rev)})
-        -- A large value goes to a staging row in parts (a request is at most 64 KiB), then into the
-        -- template row in one statement: the plugin never reads a partial value.
-        local text, pos = rex.json.encode(op.value), 1
-        W.sql_write("INSERT INTO meta (k, v) VALUES ('test-stage', '') ON CONFLICT (k) DO UPDATE SET v = ''")
-        while pos <= #text do
-          local n = math.min(8000, #text - pos + 1)
-          while pos + n <= #text and text:byte(pos + n) >= 0x80 and text:byte(pos + n) < 0xC0 do n = n - 1 end
-          W.sql_write("UPDATE meta SET v = v || ? WHERE k = 'test-stage'", {text:sub(pos, pos + n - 1)})
-          pos = pos + n
-        end
-        W.sql_write("INSERT INTO templates (hex, rev, value) SELECT ?, ?, v FROM meta WHERE k = 'test-stage'"
-          .. ' ON CONFLICT (hex) DO UPDATE SET rev = excluded.rev, value = excluded.value', {hx, rev})
-        W.sql_write("DELETE FROM meta WHERE k = 'test-stage'")
-      end
-    elseif not write_rec(op) then
-      rest[#rest + 1] = op
+      batch[#batch + 1] = {id = run.id, status = status, text = t}
+      if #batch * SMALL >= 40000 then insert_runs(batch); batch = {} end
+    else
+      insert_runs(batch); batch = {}
+      stage(t)
+      W.sql_write("INSERT INTO runs (id, ver, status, value) SELECT ?, 1, ?, v FROM meta WHERE k = 'test-stage'" .. UPSERT_RUN, {run.id, status})
+      unstage()
     end
   end
-  flush()
-  if #rest > 0 then write(rest) end
+  insert_runs(batch)
 end
+function W.delete_run(id) W.sql_write('DELETE FROM runs WHERE id = ?', {id}) end
+
+-- The run counter: the last run ID as text, or nil. W.set_counter(nil) deletes it.
+function W.counter() local r = sql("SELECT v FROM meta WHERE k = 'run-counter'")[1]; return r and r.v end
+function W.set_counter(v)
+  if v == nil then W.sql_write("DELETE FROM meta WHERE k = 'run-counter'") return end
+  W.sql_write("INSERT INTO meta (k, v) VALUES ('run-counter', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", {v})
+end
+-- next_run_id is the ID that the next admitted run gets (the run counter + 1; small numbers only).
+function W.next_run_id() return tostring((tonumber(W.counter()) or 0) + 1) end
+
+-- Run keys: {run_id, expired_at, form_rev}. expired_at nil: the key names its live run.
+function W.run_key(key)
+  return sql('SELECT run_id, expired_at, form_rev FROM run_keys WHERE key = ?', {key})[1]
+end
+function W.put_run_key(key, row)
+  W.sql_write('INSERT INTO run_keys (key, run_id, expired_at, form_rev) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE'
+    .. ' SET run_id = excluded.run_id, expired_at = excluded.expired_at, form_rev = excluded.form_rev',
+    {key, row.run_id, null(row.expired_at), null(row.form_rev)})
+end
+function W.delete_run_key(key) W.sql_write('DELETE FROM run_keys WHERE key = ?', {key}) end
+
+-- Start forms: {rev, fingerprint, request, at}. W.put_form writes a form with a new revision and
+-- returns it.
+function W.form(key)
+  local r = sql('SELECT rev, at FROM start_forms WHERE key = ?', {key})[1]
+  if not r then return nil end
+  return {rev = r.rev, fingerprint = text('start_forms', 'fingerprint', 'key', key),
+    request = rex.json.decode(text('start_forms', 'request', 'key', key)), at = r.at}
+end
+function W.put_form(key, form)
+  local rev = new_rev()
+  stage(rex.json.encode(form.request))
+  W.sql_write("INSERT INTO start_forms (key, rev, fingerprint, request, at) SELECT ?, ?, ?, v, ? FROM meta WHERE k = 'test-stage'"
+    .. ' ON CONFLICT (key) DO UPDATE SET rev = excluded.rev, fingerprint = excluded.fingerprint, request = excluded.request, at = excluded.at',
+    {key, rev, form.fingerprint, null(form.at)})
+  unstage()
+  return rev
+end
+function W.delete_form(key) W.sql_write('DELETE FROM start_forms WHERE key = ?', {key}) end
+
+-- Switches: {state, code, message}, by the operation key of the start.
+function W.switch(key) return sql('SELECT state, code, message FROM switches WHERE start_key = ?', {key})[1] end
+function W.put_switch(key, row)
+  W.sql_write('INSERT INTO switches (start_key, state, code, message) VALUES (?, ?, ?, ?) ON CONFLICT (start_key) DO UPDATE'
+    .. ' SET state = excluded.state, code = excluded.code, message = excluded.message', {key, row.state, null(row.code), null(row.message)})
+end
+
+-- Templates: {rev, value}, by the hex of the name (any hex, also one that Templates did not
+-- write). W.put_template writes a value with a new revision and returns it.
+function W.template(hx)
+  local row = sql('SELECT CAST(rev AS TEXT) AS rev FROM templates WHERE hex = ?', {hx})[1]
+  if not row then return nil end
+  return {rev = row.rev, value = rex.json.decode(text('templates', 'value', 'hex', hx))}
+end
+function W.put_template(hx, value)
+  local rev = new_rev()
+  stage(rex.json.encode(value))
+  W.sql_write("INSERT INTO templates (hex, rev, value) SELECT ?, ?, v FROM meta WHERE k = 'test-stage'"
+    .. ' ON CONFLICT (hex) DO UPDATE SET rev = excluded.rev, value = excluded.value', {hx, rev})
+  unstage()
+  return rev
+end
+function W.delete_template(hx) W.sql_write('DELETE FROM templates WHERE hex = ?', {hx}) end
 -- put_op saves an operation reply in SQL, as an older version saved it (and the import copied it).
 function W.put_op(op)
   W.sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {op.key, op.fingerprint, rex.json.encode(op.result)})
 end
-function W.template(name) return W.trow('template/' .. W.hex(name)).value end
--- The records of a UI start with operation key key.
-function W.start_form_key(key) return 'start-form/' .. W.hex('start/' .. W.part(key)) end
--- The start record of an agent's start: 'start/agent/' .. part(agent) .. part(key).
-function W.start_form_key_agent(agent_id, key) return 'start-form/' .. W.hex('start/agent/' .. W.part(agent_id) .. W.part(key)) end
-function W.switch_record(key) return W.rec('switch/' .. W.hex('start/' .. W.part(key))).value end
 -- ui_delete deletes a template as the user does in session s: the panel row opens the template
 -- menu, Delete… opens the confirmation (with the revision of that choice), and Delete submits it.
 -- It returns the final operation of the submit and the confirmation view.
@@ -328,7 +293,7 @@ function W.ui_delete(s, name, key)
   p:action('templates', 'open', {item_id = hx}, key .. '-open')
   local menu = user:view('/forms/template/' .. hx, nil, s)
   menu:render()
-  local rev = W.trow('template/' .. hx).rev
+  local rev = W.template(hx).rev
   menu:action('template_menu', 'delete', {item_id = 'delete'}, key .. '-menu')
   local confirm = user:view('/forms/delete/' .. hx .. '/' .. rev, nil, s)
   confirm:render()

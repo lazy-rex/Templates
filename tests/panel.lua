@@ -10,10 +10,10 @@ test('C a retried delete keeps a newer template with the same name', function()
   expect(alice:call('templates.delete', {template = 'web', key = 'c-delete'})).to_equal({})
   alice:call('templates.save', {name = 'web', root = root, session_id = s, key = 'c-save-2'})
   expect(alice:call('templates.delete', {template = 'web', key = 'c-delete'})).to_equal({})
-  expect(W.template('web')).not_to_be(nil)
+  expect(W.template(W.hex('web'))).not_to_be(nil)
   -- The user's delete in the panel (the menu, then the confirmation) also commits with its result.
   expect(W.ui_delete(s, 'web', 'c-ui-delete').status).to_be('succeeded')
-  expect(W.template('web')).to_be(nil)
+  expect(W.template(W.hex('web'))).to_be(nil)
 end)
 
 -- D: 55 runs: the oldest is stuck (an agent's start that has no grant: it dispatches nothing),
@@ -21,16 +21,16 @@ end)
 test('D an old stuck start stays listed with Dismiss behind 54 newer starts, and dismisses', function()
   local s = W.workspace()
   local root = W.real(W.HOME)
-  local ops = {}
+  local runs = {}
   for i = 900, 954 do
     local run = {id = tostring(i), status = i == 900 and 'authorizing' or 'open', next_tab = i == 900 and 1 or 2,
       tabs = {{key = 'templates/' .. i .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}}, root = root,
       request = {key = 'k' .. i, root = root, new_session_name = 't' .. i, template = {v = 1, name = 't' .. i, tabs = {}}},
       results = {}, session_key = 'templates/' .. i .. '/session'}
     if i == 900 then run.request.by = 'alice' end
-    ops[#ops + 1] = {key = 'run/' .. i, value = run}
+    runs[#runs + 1] = run
   end
-  W.twrite(ops)
+  W.put_runs(runs)
   local p = W.panel(s)
   local tree = p:render()
   local stuck = node(tree, 'stuck').items
@@ -42,5 +42,5 @@ test('D an old stuck start stays listed with Dismiss behind 54 newer starts, and
   expect(recent[1].id).to_be('954')
   for _, item in ipairs(recent) do expect(item.action).to_be(nil) end
   expect(p:action('stuck', 'dismiss', {item_id = 'dismiss:900'}, 'd-dismiss').status).to_be('succeeded')
-  expect(W.rec('run/900').value.status).to_be('dismissed')
+  expect(W.run('900').value.status).to_be('dismissed')
 end)

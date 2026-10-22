@@ -81,7 +81,7 @@ test('a template that cannot start at its save root is refused at save (agent pa
   expect(ok).to_be(false)
   expect(err.code).to_be('invalid_input')
   expect(err.message).to_match('too large to start')
-  expect(W.trow('template/' .. W.hex('size-big')).value).to_be(nil)
+  expect(W.template(W.hex('size-big'))).to_be(nil)
   -- No save operation was saved: the same key saves another session.
   local small = server_pane(alice, 'small')
   expect(alice:call('templates.save', {name = 'size-big', root = small.dir, session_id = small.session, key = 'size-big'}).name).to_be('size-big')
@@ -98,19 +98,19 @@ test('a template that cannot start at its save root is refused at save (form pat
   expect(op.status).to_be('failed')
   expect(op.error.code).to_be('invalid_input')
   expect(tostring(op.error.message)).to_match('too large to start')
-  expect(W.trow('template/' .. W.hex('size-big-form')).value).to_be(nil)
+  expect(W.template(W.hex('size-big-form'))).to_be(nil)
 end)
 
 -- The guarantee at its boundary: a template just under the save limit starts at its save root on
 -- both paths. A start that breaks a condition can be refused at admission: a longer encoded root
--- (a), a longer encoded session name (c). The refusal makes no run, no session and no counter
--- change; the frozen start-form record stays (start_core writes it before admission).
+-- (a), a longer encoded session name (c). The refusal makes no run, no session, no counter
+-- change and no start form (admission writes the form in its transaction).
 test('just under the save limit: it starts at its root; a longer root or name is refused at admission', function()
   local alice = agent('alice')
   -- Calibrate: the size of one "&" of the port arg, from the template that a small save writes.
   local small = server_pane(alice, '&')
   alice:call('templates.save', {name = 'size-cal', root = small.dir, session_id = small.session, key = 'size-cal'})
-  local cal = W.template('size-cal')
+  local cal = W.template(W.hex('size-cal')).value
   local R = small.dir
   local per = reference(with_port(cal, 2), R) - reference(with_port(cal, 1), R)
   local n = 1 + math.floor((Run.MAX_RUN - reference(cal, R)) / per)
@@ -124,7 +124,7 @@ test('just under the save limit: it starts at its root; a longer root or name is
   local edge = server_pane(alice, string.rep('&', n))
   expect(edge.dir).to_be(R)
   alice:call('templates.save', {name = 'size-edge', root = R, session_id = edge.session, key = 'size-edge'})
-  local t = W.template('size-edge')
+  local t = W.template(W.hex('size-edge')).value
   expect(reference(t, R) <= Run.MAX_RUN).to_be(true)
   -- At the save root, both paths start it.
   local r = alice:call('templates.start', {template = 'size-edge', root = R, key = 'size-edge-a'})
@@ -141,14 +141,14 @@ test('just under the save limit: it starts at its root; a longer root or name is
   W.mkdir(long)
   long = W.real(long)
   expect(lower(t, long) > Run.MAX_RUN).to_be(true)
-  local counter, before = W.rec('run-counter').value, sessions()
+  local counter, before = W.counter(), sessions()
   expect_error(function()
     alice:call('templates.start', {template = 'size-edge', root = long, key = 'size-edge-long'})
   end, 'invalid_input')
-  expect(W.rec('run-counter').value).to_be(counter)
+  expect(W.counter()).to_be(counter)
   expect(sessions()).to_be(before)
   -- The start form commits only with an admission: a refused start leaves none.
-  expect(W.rec(W.start_form_key_agent('alice', 'size-edge-long')).value).to_be(nil)
+  expect(W.form(W.agent_start_key('alice', 'size-edge-long'))).to_be(nil)
   -- (c) A longer encoded session name than the template name, at R (user path).
   local name = string.rep('<', 1000)
   expect(lower(t, R, name) > Run.MAX_RUN).to_be(true)
@@ -158,9 +158,9 @@ test('just under the save limit: it starts at its root; a longer root or name is
   local refused = form2:action('start_session', 'submit', {values = values2}, 'size-edge-name')
   expect(refused.status).to_be('failed')
   expect(tostring(refused.error.message)).to_match('too large to start')
-  expect(W.rec('run-counter').value).to_be(counter)
+  expect(W.counter()).to_be(counter)
   expect(sessions()).to_be(before)
-  expect(W.rec(W.start_form_key('size-edge-name')).value).to_be(nil)
+  expect(W.form(W.start_key('size-edge-name'))).to_be(nil)
 end)
 
 -- A saved save operation answers before the size check: the replay returns the saved result.
