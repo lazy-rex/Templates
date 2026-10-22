@@ -16,7 +16,7 @@ Size before: `templates.lua` 1613 lines, `templates_run.lua` 754 lines (2367); t
 | `if_rev` reads and `conflict` retries around each `hub.store.batch` | one transaction per handler |
 | `scan_all`, `smaller`, the scan paging and `reply_too_large` halving (Store scans) | SQL queries with `ORDER BY` and `LIMIT` |
 | `hub.ui.invalidate` after engine writes | table dependencies (section 10 of sql.md) |
-| the Save form's re-render on every store commit (item 5) | the Save form reads no table, so commits do not render it |
+| the Save form's re-render on every store commit (item 5) | tracked table dependencies: the Save form render reads no store record today (`save_tree`: capture, `hub.profiles`, `hub.session.list`), so its render must read no table, and a commit must not render it; its submit reads `templates` and `ops`, which is not a render. To measure with `renders()` after the port. |
 
 ## 2. What stays
 
@@ -38,30 +38,50 @@ Schema (version 1):
 ```sql
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);          -- rev counter, run counter, import state
 CREATE TABLE templates (hex TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL);   -- JSON
-CREATE TABLE runs (id INTEGER PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL);
-CREATE TABLE run_keys (key TEXT PRIMARY KEY, value TEXT NOT NULL);       -- admission and retention markers
-CREATE TABLE start_forms (key TEXT PRIMARY KEY, value TEXT NOT NULL);    -- frozen Start form requests
-CREATE TABLE switches (key TEXT PRIMARY KEY, value TEXT NOT NULL);       -- switch decisions
+CREATE TABLE runs (id TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL);   -- id: exact decimal text
+CREATE TABLE run_keys (key TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL);    -- admission and retention markers
+CREATE TABLE start_forms (key TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL); -- frozen Start form requests
+CREATE TABLE switches (key TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL);    -- switch decisions
 CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL);  -- permanent replay
 ```
 
 - A template keeps the hex of its old storage key as its identity (Panel delete). A record that
   Templates did not write keeps its key and value unchanged (a JSON text, or a blob if it is not
   valid UTF-8).
+- Run IDs: `MAX_RUN_ID` allows 32 decimal digits, more than an SQLite INTEGER holds, so an ID is
+  exact text. Where numeric order is needed (newest first, retention), the order is by length, then
+  by the digits: `ORDER BY length(id), id`.
 - Revisions: `rev` comes from one plugin counter in `meta`, which starts above the highest imported
   revision. So a route or an agent `replace` that holds an old revision never matches a newer record.
+  Every table whose revision is held outside one transaction keeps `rev`, and the import keeps the
+  store revision of each record:
+  - `templates.rev`: the delete route (`/forms/delete/<hex>/<rev>`), `templates.get` and `replace`.
+  - `start_forms.rev`: a retention marker keeps `form_rev`, the revision of the frozen form record,
+    and compares it later (`switch_settled`, the cleanup, `start_core`).
+  - `runs.rev`, `run_keys.rev`, `switches.rev`: today they guard read-then-write steps (`if_rev`).
+    In a handler transaction the guard is the transaction; the engine steps that span an external
+    call (a pane creation, an app switch) still compare the revision that the earlier phase read.
 - One-time import, at startup before the plugin serves: a bounded loop over `hub.store.scan` of each
-  prefix (`template/`, `run/`, `run-counter`, `run-key/`, `start-form/`, `switch/`, and the
-  operation records), in steps that each commit. `meta.import` records the last key of each prefix,
-  so a crash continues the import. The store records are not deleted by the import (rollback
-  safety); a later commit deletes them after a release.
+  record prefix (`template/`, `run/`, `run-counter`, `run-key/`, `start-form/`, `switch/`), in steps
+  that each commit. `meta.import` records the last key of each prefix, so a crash continues the
+  import.
+- Operation records cannot be imported: `hub.store.scan` reads records only, and `hub.store.op`
+  reads one operation by its exact key. Until the hub offers an export of a plugin's operation
+  records (asked of the hub owner), a key that is not in `ops` falls back to a read-only
+  `hub.store.op` (legacy replay), with the same fingerprint check. So old operations replay as long
+  as the hub keeps them. Without that fallback or an export, permanent replay of old operations is
+  not kept.
+- Rollback: after the SQL tables take new writes, the old store records are stale. Keeping them
+  does not make a rollback safe. A rollback needs a coordinated backup of the hub and plugin files
+  (sql.md, "Backup"), or a reverse migration.
 
 ## 4. Decisions needed
 
 1. **Replay window: decided** (coordinator, 2026-10-22). Templates keeps its own `ops` table with
    `{store = false}`: a saved operation replays without a time limit, as today. Starts keep their
    own records (run keys and retention markers, 30 days).
-2. **Store data after the import:** keep it until one release later, or delete it in the import.
+2. **Store data after the import:** keep it until one release later (it is not a rollback path:
+   section 3), or delete it in the import.
 
 ## 5. Order of work
 
