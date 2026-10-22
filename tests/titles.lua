@@ -27,7 +27,7 @@ local function started(alice, name, tabs, root)
   W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = tabs}}})
   local r = alice:call('templates.start', {template = name, root = root, key = name .. '-start-' .. S.n})
   W.wait_run(alice, r.run_id, 'open')
-  local s = store('run/' .. r.run_id).value.session_id
+  local s = W.rec('run/' .. r.run_id).value.session_id
   local all, workers, by_title = {}, {}, {}
   for _, x in ipairs(alice:hub('hub.workers', {}).workers) do if x.block_id then all[x.block_id] = x end end
   for _, b in ipairs(W.blocks(s)) do

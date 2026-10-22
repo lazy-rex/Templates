@@ -1,7 +1,7 @@
 -- Save and start sizes (tests/templates-run.md, "Save size"). A run record holds its template about
 -- three times, so a template that its save accepts could be too large to start (engine admission,
 -- MAX_RUN). The save measures four reference starts at its root and refuses such a template.
--- The boundary tests measure offline with the engine module (engine.measure, no store) to choose
+-- The boundary tests measure offline with the engine module (engine.measure, no database) to choose
 -- their sizes, and then use the public paths.
 
 local dir = H.args.file:match('^(.*)/')
@@ -9,7 +9,9 @@ local W = load_fixture(dir .. '/support/workspace.lua')
 local Run = load_fixture(dir .. '/../templates_run.lua')
 local offline = Run.new({hub = function(action) error('offline: ' .. action) end, start_tab = function() end,
   resolve_root = function(r) return r end, resolve_dir = function(root, d) return d == '.' and root or root .. '/' .. d end,
-  now = function() return 0 end, after = function() end})
+  now = function() return 0 end, after = function() end,
+  data = setmetatable({}, {__index = function(_, name) return function() error('offline: data.' .. name) end end}),
+  transaction = function() error('offline: transaction') end})
 local function part(s) return #s .. ':' .. s end
 local S = {n = 0} -- a table field (LazyRex docs/rex-protocol.md, "Rex Lua runtime")
 
@@ -139,13 +141,14 @@ test('just under the save limit: it starts at its root; a longer root or name is
   W.mkdir(long)
   long = W.real(long)
   expect(lower(t, long) > Run.MAX_RUN).to_be(true)
-  local counter, before = store('run-counter').value, sessions()
+  local counter, before = W.rec('run-counter').value, sessions()
   expect_error(function()
     alice:call('templates.start', {template = 'size-edge', root = long, key = 'size-edge-long'})
   end, 'invalid_input')
-  expect(store('run-counter').value).to_be(counter)
+  expect(W.rec('run-counter').value).to_be(counter)
   expect(sessions()).to_be(before)
-  expect(store(W.start_form_key_agent('alice', 'size-edge-long')).value).not_to_be(nil)
+  -- The start form commits only with an admission: a refused start leaves none.
+  expect(W.rec(W.start_form_key_agent('alice', 'size-edge-long')).value).to_be(nil)
   -- (c) A longer encoded session name than the template name, at R (user path).
   local name = string.rep('<', 1000)
   expect(lower(t, R, name) > Run.MAX_RUN).to_be(true)
@@ -155,9 +158,9 @@ test('just under the save limit: it starts at its root; a longer root or name is
   local refused = form2:action('start_session', 'submit', {values = values2}, 'size-edge-name')
   expect(refused.status).to_be('failed')
   expect(tostring(refused.error.message)).to_match('too large to start')
-  expect(store('run-counter').value).to_be(counter)
+  expect(W.rec('run-counter').value).to_be(counter)
   expect(sessions()).to_be(before)
-  expect(store(W.start_form_key('size-edge-name')).value).not_to_be(nil)
+  expect(W.rec(W.start_form_key('size-edge-name')).value).to_be(nil)
 end)
 
 -- A saved save operation answers before the size check: the replay returns the saved result.

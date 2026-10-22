@@ -17,41 +17,93 @@ local function expect_error(fn, code)
   assert(not ok and type(err) == 'table' and err.code == code, 'Expected ' .. code)
 end
 local function fixture()
-  local f = {records={}, rev=0, creates=0, sessions=0, calls={}, windows={}, scans={}}
+  local f = {records={}, ops={}, rev=0, creates=0, sessions=0, calls={}, windows={}, scans={}}
+  -- f.records keeps the old store keys and record shapes {rev, value}: 'run/<id>' (rev is the
+  -- run's ver), 'run-key/<key>' {id, expired_at, form_rev}, 'run-counter', 'start-form/<key>'
+  -- {fingerprint, request, at} and 'switch/<key>'. f.data is the engine's data layer
+  -- (templates_sql.lua) on that map; f.transaction is app.db.transaction: a failed function
+  -- restores the map. f.fail_before fails the next transaction before it writes; f.lose_store
+  -- commits it and then fails, as a lost commit reply; f.op_exists makes the next get_op find a row.
+  local function put(key, value) f.rev, f.writes = f.rev + 1, (f.writes or 0) + 1; f.records[key] = {rev=tostring(f.rev), value=copy(value)}; return tostring(f.rev) end
+  local function drop(key) if f.records[key] then f.writes = (f.writes or 0) + 1 end; f.records[key] = nil end
+  local function value(key) local r = f.records[key]; return r and copy(r.value) end
+  local function older(a, b) return #a < #b or #a == #b and a < b end
+  local d = {}
+  function d.get_run(id) local r = f.records['run/' .. id]; if r then return {ver=tonumber(r.rev), value=copy(r.value)} end end
+  function d.insert_run(run) put('run/' .. run.id, run) end
+  function d.update_run(run, ver)
+    local r = f.records['run/' .. run.id]
+    if not r or tonumber(r.rev) ~= ver then return false end
+    put('run/' .. run.id, run)
+    return true
+  end
+  function d.delete_run(id) drop('run/' .. id) end
+  function d.run_summaries(after, limit)
+    f.scans[#f.scans + 1] = {limit=limit, after=after, prefix='run/'}
+    if f.scan_fail then local err = f.scan_fail({limit=limit, after=after}); if err then error(err, 0) end end
+    local ids = {}
+    for k in pairs(f.records) do
+      local id = k:match('^run/(%d+)$')
+      if id and (not after or older(after, id)) then ids[#ids + 1] = id end
+    end
+    table.sort(ids, older)
+    local out = {}
+    for i = 1, math.min(#ids, limit) do
+      local run = f.records['run/' .. ids[i]].value
+      out[i] = {id=run.id, status=run.status, request={by=run.request.by}, grant_id=run.grant_id, grant_revoked=run.grant_revoked}
+    end
+    return out
+  end
+  function d.get_counter() return value('run-counter') end
+  function d.set_counter(id) put('run-counter', id) end
+  function d.get_run_key(key)
+    local v = value('run-key/' .. key)
+    if v then return {run_id=v.id, expired_at=v.expired_at, form_rev=v.form_rev} end
+  end
+  function d.put_run_key(key, run_id) put('run-key/' .. key, {id=run_id}) end
+  function d.mark_run_key(key, run_id, expired_at, form_rev) put('run-key/' .. key, {id=run_id, expired_at=expired_at, form_rev=form_rev}) end
+  function d.delete_run_key(key) drop('run-key/' .. key) end
+  function d.expired_markers(after, cutoff, limit)
+    f.scans[#f.scans + 1] = {limit=limit, after=after, prefix='run-key/'}
+    local keys = {}
+    for k, r in pairs(f.records) do
+      local key = k:match('^run%-key/(.*)$')
+      if key and r.value.expired_at ~= nil and r.value.expired_at <= cutoff and (not after or key > after) then keys[#keys + 1] = key end
+    end
+    table.sort(keys)
+    local out = {}
+    for i = 1, math.min(#keys, limit) do
+      local v = f.records['run-key/' .. keys[i]].value
+      out[i] = {key=keys[i], run_id=v.id, expired_at=v.expired_at, form_rev=v.form_rev}
+    end
+    return out
+  end
+  function d.get_form(key)
+    local r = f.records['start-form/' .. key]
+    if r then return {rev=r.rev, fingerprint=r.value.fingerprint, request=copy(r.value.request), at=r.value.at} end
+  end
+  function d.put_form(key, fingerprint, request, at) return put('start-form/' .. key, {fingerprint=fingerprint, request=request, at=at}) end
+  function d.delete_form(key) drop('start-form/' .. key) end
+  function d.get_switch(key) local v = value('switch/' .. key); if v then return {state=v.state, code=v.code, message=v.message} end end
+  function d.delete_switch(key) drop('switch/' .. key) end
+  function d.get_op(key)
+    if f.op_exists then f.op_exists = nil; return {fingerprint='other', result={}} end
+    return copy(f.ops[key])
+  end
+  function d.put_op(key, fingerprint, result) f.writes = (f.writes or 0) + 1; f.ops[key] = {fingerprint=fingerprint, result=copy(result)} end
+  f.data = d
+  function f.transaction(fn)
+    if f.fail_before then f.fail_before = nil; error('store unavailable') end
+    local records, ops, rev, writes = copy(f.records), copy(f.ops), f.rev, f.writes or 0
+    local ok, result = pcall(fn)
+    if not ok then f.records, f.ops, f.rev, f.writes = records, ops, rev, writes; error(result, 0) end
+    -- f.batches counts the transactions that wrote (as the store fake counted its batches).
+    if (f.writes or 0) > writes then f.batches = (f.batches or 0) + 1 end
+    if f.lose_store then f.lose_store = nil; error('lost committed store reply') end
+    return result
+  end
   function f.hub(action, args)
-    if action == 'hub.store.get' then
-      local out = {}; for _, key in ipairs(args.keys) do out[key] = copy(f.records[key] or {rev='0'}) end
-      return {records=out}
-    elseif action == 'hub.store.batch' then
-      if f.fail_before then f.fail_before = nil; error('store unavailable') end
-      if f.op_exists and args.op then f.op_exists = nil; return {op_exists={key=args.op.key}} end
-      for _, op in ipairs(args.ops) do
-        if (f.records[op.key] or {rev='0'}).rev ~= op.if_rev then return {conflict=true} end
-      end
-      local revs = {}
-      f.batches = (f.batches or 0) + 1
-      for _, op in ipairs(args.ops) do
-        f.rev = f.rev + 1
-        -- A deleted record is absent, as in the hub (a get gives rev '0').
-        if op.delete then f.records[op.key] = nil else f.records[op.key] = {rev=tostring(f.rev), value=copy(op.value)} end
-        revs[op.key] = tostring(f.rev)
-      end
-      if f.lose_store then f.lose_store = nil; error('lost committed store reply') end
-      return {revs=revs}
-    elseif action == 'hub.store.scan' then
-      -- Pages as the hub does: keys in order after args.after, at most args.limit, next = the
-      -- last key of a page that has more. f.scan_fail(args) can fail a call with an error.
-      f.scans[#f.scans + 1] = {limit=args.limit, after=args.after, prefix=args.prefix}
-      if f.scan_fail then local err = f.scan_fail(args); if err then error(err, 0) end end
-      local keys = {}
-      for k in pairs(f.records) do
-        if k:sub(1, #args.prefix) == args.prefix and (not args.after or k > args.after) then keys[#keys + 1] = k end
-      end
-      table.sort(keys)
-      local out, limit = {}, args.limit or 500
-      for i = 1, math.min(#keys, limit) do out[keys[i]] = copy(f.records[keys[i]]) end
-      return {records=out, next=#keys > limit and keys[limit] or nil}
-    elseif action == 'hub.session.ensure' then
+    if action == 'hub.session.ensure' then
       if not f.session then f.sessions = f.sessions + 1; f.session = 'session:1' end
       if f.lose_session then f.lose_session = nil; error('unknown session outcome') end
       return {session_id=f.session}
@@ -59,6 +111,7 @@ local function fixture()
     error('Unexpected hub action: ' .. action)
   end
   function f.start(request)
+    if f.on_start then local hook = f.on_start; f.on_start = nil; hook(request) end
     f.calls[#f.calls + 1] = copy(request)
     if f.pending then return {status='unknown', error='awaiting reconciliation'} end
     if f.failure then return {status=f.failure, error='deliberate failure'} end
@@ -94,7 +147,7 @@ local function fixture()
       return dir == '.' and root or root .. '/' .. dir
     end,
     now=function() return f.now end, after=function(delay, fn) f.timers[#f.timers + 1] = {due=f.now + delay, fn=fn} end,
-    wake=function() f.wakes = f.wakes + 1 end}
+    wake=function() f.wakes = f.wakes + 1 end, data=f.data, transaction=f.transaction}
     for k, v in pairs(extra or {}) do o[k] = v end
     return Run.new(o)
   end
@@ -198,7 +251,7 @@ end
 function tests.relative_resolver_result()
   local f=fixture()
   local e=Run.new({hub=f.hub, start_tab=f.start, resolve_root=function() return '/' end,
-    resolve_dir=function() return 'relative' end})
+    resolve_dir=function() return 'relative' end, data=f.data, transaction=f.transaction})
   expect_error(function() e.admit(request()) end, 'invalid_input')
 end
 function tests.focus_intent_is_frozen()
@@ -398,42 +451,28 @@ function tests.an_oversized_id_from_the_hub_is_an_invalid_result()
   local got=e.get(run.id)
   assert(got.status == 'blocked' and got.error:find('Invalid tab start result', 1, true), got.status)
 end
--- Store scans (templates_run.lua, "Store scans"). admitted makes count runs that a new engine (a
--- plugin restart) must find by its scan: the first engine never ticks.
+-- Run pages (data.run_summaries, in run ID order). admitted makes count runs that a new engine (a
+-- plugin restart) must find by its pages: the first engine never ticks.
 local function admitted(f, count)
   local e = f.engine()
   for i = 1, count do e.admit(request('scan-' .. i)) end
 end
-local too_large = {code='reply_too_large', message='reply too large'}
-local function limits(f)
-  local out = {}
-  -- The run scans only (the retention cleanup scans run-key/).
-  for _, s in ipairs(f.scans) do if s.prefix == 'run/' then out[#out + 1] = s.limit end end
-  return out
-end
-function tests.a_scan_halves_its_limit_on_reply_too_large_and_keeps_its_cursor()
-  local f=fixture(); admitted(f, 5)
-  -- A page of more than 3 records is too large.
-  f.scan_fail=function(args) if args.limit > 3 then return too_large end end
+function tests.a_scan_reads_pages_of_scan_limit_after_the_last_run_id()
+  local f=fixture(); admitted(f, Run.SCAN_LIMIT + 3)
   local e=f.engine(); e.resume()
-  -- One scan call per tick at most.
-  for i=1, 60 do
+  -- One page per tick at most.
+  for i=1, 400 do
     local before=#f.scans
     local more, err = e.tick(); assert(not err, tostring(err))
-    assert(#f.scans - before <= 1, 'more than one scan call in a tick')
+    local runs = 0
+    for j = before + 1, #f.scans do if f.scans[j].prefix == 'run/' then runs = runs + 1 end end
+    assert(runs <= 1, 'more than one page in a tick')
     if not more then break end
   end
-  assert(equal(limits(f), {50, 25, 12, 6, 3, 3}), table.concat(limits(f), ','))
-  -- The same page is asked again (same after) until it passes; then the cursor moves on.
-  for i=1, 5 do assert(f.scans[i].after == nil, 'cursor moved before a page passed') end
-  assert(f.scans[6].after == 'run/3')
-  -- Every run was found once and opened once (2 tabs each).
-  for i=1, 5 do assert(e.get(tostring(i)).status == 'open', 'run ' .. i) end
-  assert(f.creates == 10, 'creates ' .. f.creates)
-  -- A new scan starts at the full limit again.
-  f.scans, f.scan_fail = {}, nil
-  e.wake(); drain(e)
-  assert(f.scans[1].limit == Run.SCAN_LIMIT)
+  local pages = {}
+  for _, s in ipairs(f.scans) do if s.prefix == 'run/' then pages[#pages + 1] = s end end
+  assert(#pages == 2 and pages[1].after == nil and pages[2].after == tostring(Run.SCAN_LIMIT), 'two pages, the second after the last ID')
+  for i=1, Run.SCAN_LIMIT + 3 do assert(e.get(tostring(i)).status == 'open', 'run ' .. i) end
 end
 function tests.a_scan_does_not_retry_another_error()
   local f=fixture(); admitted(f, 1)
@@ -444,21 +483,6 @@ function tests.a_scan_does_not_retry_another_error()
   assert(not select(1, e.tick()) and #f.scans == 1, 'no retry before a wake')
   f.scan_fail=nil; e.wake(); drain(e)
   assert(e.get('1').status == 'open')
-end
-function tests.a_scan_stops_when_a_page_of_one_is_too_large()
-  local f=fixture(); admitted(f, 1)
-  f.scan_fail=function() return too_large end
-  local e=f.engine(); e.resume()
-  local errors = 0
-  for i=1, 20 do
-    local more, err = e.tick()
-    if err then errors = errors + 1; assert(err.code == 'reply_too_large') end
-    if not more then break end
-  end
-  assert(errors == 1, 'the error is returned once')
-  assert(equal(limits(f), {50, 25, 12, 6, 3, 1}), table.concat(limits(f), ','))
-  assert(not select(1, e.tick()) and #f.scans == 6, 'no scan after the stop')
-  assert(e.get('1').status == 'queued')
 end
 -- Size bounds at their encoded size (templates_run.lua, "Size bounds"). rex do and the hub encode
 -- "<", ">" and "&" as 6 bytes; every size here is measured with rex.json.encode.
@@ -505,29 +529,16 @@ local function worst_run(run, err_char)
   end
   return final
 end
--- frame is the client.perform request that carries a hub.store.batch of the plugin.
-local function frame(args)
-  return {type='request', id='4294967295', method='client.perform', payload={
-    client_id='client:01a156b7-98dc-7330-a826-228df9162450', action='hub.store.batch', timeout_ms=10000, args=args}}
-end
+-- The run's writes are SQL statements that templates_sql.lua measures and cuts in chunks
+-- (write_text, FRAME_MAX): only the record bound (MAX_RUN) is checked here.
 local function fits(what, v, limit)
   assert(size(v) <= limit, what .. ': encoded ' .. size(v) .. ' bytes, limit ' .. limit)
 end
 for _, case in ipairs({{'a', '<'}, {'&', '<'}, {'<', '"'}}) do
   local args, errs = case[1], case[2]
-  tests['the largest admitted run with args of ' .. args .. ' and errors of ' .. errs .. ' fits in every write'] = function()
-    local run, f = largest(args)
-    local final = worst_run(run, errs)
-    fits('the final record', final, MAX_RUN)
-    -- The admission batch, as the engine wrote it (the fixture kept the record).
-    fits('the admission write', frame({ops={{key='run-key/' .. run.request.key, if_rev='0', value={id=RUN_ID}},
-      {key='run-counter', if_rev=string.rep('9', 20), value=RUN_ID}, {key='run/' .. RUN_ID, if_rev='0', value=f.records['run/' .. RUN_ID].value}}}), MAX_MESSAGE)
-    local record = {key='run/' .. RUN_ID, if_rev=string.rep('9', 20), value=final}
-    fits('a state write', frame({ops={record}}), MAX_MESSAGE)
-    fits('the dismiss write', frame({ops={record}, op={key=worst_op_key('dismiss'),
-      fingerprint='dismiss-v1/' .. part(RUN_ID), result={run_id=RUN_ID, status='dismissed'}}}), MAX_MESSAGE)
-    fits('the retry write', frame({ops={record}, op={key=worst_op_key('retry'),
-      fingerprint='retry-v1/' .. part(RUN_ID), result={run_id=RUN_ID, woken=true}}}), MAX_MESSAGE)
+  tests['the largest admitted run with args of ' .. args .. ' and errors of ' .. errs .. ' fits MAX_RUN at its final size'] = function()
+    local run = largest(args)
+    fits('the final record', worst_run(run, errs), MAX_RUN)
   end
 end
 -- bounded against the real encoder: at most MAX_TEXT bytes and MAX_TEXT_JSON encoded bytes, the
@@ -815,54 +826,47 @@ function tests.retention_cleanup_leaves_a_key_reused_after_its_scan()
   assert(f.records['run-key/a'].value.id == '7' and f.records['start-form/a'].value.fingerprint == 'new', 'the reuse stays')
 end
 
-function tests.retention_the_retirement_batch_is_small_with_the_largest_keys()
+function tests.retention_retires_a_run_with_the_largest_keys()
+  -- The largest operation key and a large start form. Each SQL statement of the retirement is a
+  -- frame that templates_sql.lua measures (write_text); here the retirement itself is checked.
   local f = fixture32()
-  local batches = {}
-  local hub = f.hub
-  f.hub = function(action, args)
-    if action == 'hub.store.batch' then batches[#batches + 1] = copy(args) end
-    return hub(action, args)
-  end
   local key = worst_op_key('start')
-  local hexkey = (key:gsub('.', function(c) return string.format('%02x', c:byte()) end))
-  local keys = {form_key=function(k) return 'start-form/' .. (k:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end,
-    switch_key=function(k) return 'switch/' .. (k:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end}
   local run = seed(f, RUN_ID, 'open')
   run.request.key = key
   f.records['run/' .. RUN_ID].value.request.key = key
   f.records['run-key/k' .. RUN_ID] = nil
   put(f, 'run-key/' .. key, {id=RUN_ID})
-  put(f, 'start-form/' .. hexkey, {fingerprint=string.rep('<', 40000)})
-  put(f, 'switch/' .. hexkey, {state='done'})
+  local form_rev = put(f, 'start-form/' .. key, {fingerprint=string.rep('<', 40000)})
+  put(f, 'switch/' .. key, {state='done'})
   -- 200 newer eligible runs: IDs of 33 digits are newer than RUN_ID (32 digits).
   for i = 1, 200 do seed(f, '2' .. string.format('%032d', i), 'open') end
-  local logs = {}
-  local e = f.engine({form_key=keys.form_key, switch_key=keys.switch_key, log=function(l) logs[#logs + 1] = l end}); e.resume(); rdrain(e)
-  assert(f.records['run/' .. RUN_ID] == nil, 'retired: ' .. table.concat(logs, ' | ') .. ' ' .. rex.json.encode(e.maintenance()) .. ' batches ' .. #batches .. ' rk ' .. tostring(f.records['run-key/' .. key] ~= nil))
-  local retire = batches[#batches]
-  assert(#retire.ops == 3, 'run, marker and switch')
-  fits('the retirement write', frame(retire), 4096)
+  local e = f.engine(); e.resume(); rdrain(e)
+  assert(f.records['run/' .. RUN_ID] == nil, 'retired')
+  local m = f.records['run-key/' .. key].value
+  assert(m.id == RUN_ID and m.form_rev == form_rev and m.expired_at == f.now, 'the marker names the form')
+  assert(f.records['switch/' .. key] == nil and f.records['start-form/' .. key] ~= nil, 'the switch is deleted; the form stays')
 end
 
 -- switch_settled (the plugin's retirable): a user start into a new session waits for its switch
 -- decision, or for the bound after the form's submit.
 function tests.switch_settled_waits_for_a_final_switch_decision_or_the_bound()
+  -- The rows of templates_sql.lua: a start form {rev, fingerprint, at} and a switch {state}.
   local run = {request={key='k', new_session_name='S'}}
-  local form = {rev='5', value={fingerprint='fp', at=1000}}
+  local form = {rev='5', fingerprint='fp', at=1000}
   local S = Run.switch_settled
-  assert(not S(run, form, {rev='0'}, 1010, 78), 'no decision, within the bound: wait')
-  assert(not S(run, form, {rev='6', value={state='attempted'}}, 1010, 78), 'attempted: wait')
-  assert(not S(run, form, {rev='6', value={state='other'}}, 1010, 78), 'an unknown state is not final')
+  assert(not S(run, form, nil, 1010, 78), 'no decision, within the bound: wait')
+  assert(not S(run, form, {state='attempted'}, 1010, 78), 'attempted: wait')
+  assert(not S(run, form, {state='other'}, 1010, 78), 'an unknown state is not final')
   for _, state in ipairs({'done', 'refused', 'unknown'}) do
-    assert(S(run, form, {rev='6', value={state=state}}, 1010, 78), state .. ' is final')
+    assert(S(run, form, {state=state}, 1010, 78), state .. ' is final')
   end
-  assert(S(run, form, {rev='0'}, 1078, 78), 'no decision at the bound: retirable')
-  assert(S(run, form, {rev='6', value={state='attempted'}}, 1078, 78), 'attempted at the bound: retirable')
-  assert(S(run, {rev='5', value={fingerprint='fp'}}, {rev='0'}, 1010, 78), 'a form without at never switches')
-  assert(S(run, {rev='5', value={fingerprint='fp', at='x'}}, {rev='0'}, 1010, 78), 'an invalid at never switches')
-  assert(S(run, {rev='0'}, nil, 1010, 78), 'no form record: nothing switches')
-  assert(S({request={key='k', session_id='session:1'}}, form, {rev='0'}, 1010, 78), 'an existing session: no switch')
-  assert(S({request={key='k', new_session_name='S', by='alice'}}, form, {rev='0'}, 1010, 78), 'an agent start: no switch')
+  assert(S(run, form, nil, 1078, 78), 'no decision at the bound: retirable')
+  assert(S(run, form, {state='attempted'}, 1078, 78), 'attempted at the bound: retirable')
+  assert(S(run, {rev='5', fingerprint='fp'}, nil, 1010, 78), 'a form without at never switches')
+  assert(S(run, {rev='5', fingerprint='fp', at='x'}, nil, 1010, 78), 'an invalid at never switches')
+  assert(S(run, nil, nil, 1010, 78), 'no form: nothing switches')
+  assert(S({request={key='k', session_id='session:1'}}, form, nil, 1010, 78), 'an existing session: no switch')
+  assert(S({request={key='k', new_session_name='S', by='alice'}}, form, nil, 1010, 78), 'an agent start: no switch')
 end
 
 function tests.retention_a_postponed_step_retires_later_by_its_timer_and_does_not_block_starts()
@@ -975,6 +979,28 @@ function tests.measure_grows_only_with_the_encoded_size_of_each_variable_string(
   -- An agent start: no by is not larger than the reference by.
   local agent = m(function(r) r.by = string.rep('<', Run.MAX_ID) end)
   assert(m(function(r) r.by = 'alice' end) <= agent and m(function(r) end) <= agent)
+end
+-- The ver check (templates_run.lua, save): advance reads the run, calls the hub, then saves over
+-- the ver of its read. Another writer that changes the run during the call wins: the save writes
+-- nothing and fails with conflict, and the next wake continues from the new version.
+function tests.a_save_after_a_hub_call_over_a_changed_run_writes_nothing()
+  local f = fixture(); local e = f.engine(); local run = e.admit(request())
+  f.on_start = function()
+    local r = f.records['run/' .. run.id]
+    local v = copy(r.value); v.error = 'set by another writer'
+    f.rev = f.rev + 1; f.records['run/' .. run.id] = {rev=tostring(f.rev), value=v}
+  end
+  local err
+  for i = 1, 10 do
+    local more, e2 = e.tick()
+    if e2 then err = e2 break end
+    if not more then break end
+  end
+  assert(type(err) == 'table' and err.code == 'conflict', 'the save conflicts')
+  local v = f.records['run/' .. run.id].value
+  assert(v.error == 'set by another writer' and v.results[1] == nil and v.next_tab == 1, 'nothing written over the change')
+  e.wake(); drain(e)
+  assert(e.get(run.id).status == 'open' and f.creates == 2, 'the next wake opens each tab once')
 end
 return tests
 end

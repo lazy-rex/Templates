@@ -32,11 +32,12 @@ local function notice(s)
   return w and w.text
 end
 local function run_named(name) return W.find(W.all_runs(S.alice), 'template', name) end
--- hold makes the next run's first update fail until release: its first tab is late. release waits
+-- hold makes the next run's first update fail until release: its first tab is late. The admission
+-- commit (it also writes the runs table) passes: skip = 1. release waits
 -- until the hold stopped an update (else the test proves nothing), ends it and wakes the engine.
 local function hold()
   local id = W.next_run_id()
-  local inj = inject({match = {updates = 'run/' .. id}, fail = 'held by the test', times = 'always'})
+  local inj = inject({match = {sql_commit_writes = 'runs'}, skip = 1, fail = 'held by the test', times = 'always'})
   holds[inj] = true
   return id, function()
     wait('the held update of run ' .. id, function() return injection(inj).consumed >= 1 end, 10)
@@ -59,9 +60,26 @@ test('F1 one app shows the form\'s session: it switches once to the first tab', 
   expect(#calls).to_be(1)
   expect(calls[1].action).to_be('session.select')
   expect(calls[1].args.session_id).to_be(run.session_id)
-  expect(calls[1].args.window_id).to_be(store('run/' .. run.id).value.results[1].window_id)
+  expect(calls[1].args.window_id).to_be(W.rec('run/' .. run.id).value.results[1].window_id)
   expect(W.switch_record(c.key).state).to_be('done')
   expect(notice(c.s)).to_be(nil)
+  a:close()
+end)
+
+-- A lost reply of the final switch write: 'done' committed, and the plugin did not get the reply
+-- (skip = 1 passes the 'attempted' insert). The decision is stored once, and the app is asked
+-- once: the plugin never repeats select_session after it ran.
+test('F1b a lost reply of the final switch write keeps the decision; the app is asked once', function()
+  local c = prepare()
+  local a = app('sw-app-1b', {sessions = {c.s}})
+  local inj = inject({match = {sql_commit_writes = 'switches'}, skip = 1, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
+  local op = submit(c)
+  expect(op.status).to_be('succeeded')
+  W.wait_run(S.alice, op.result.run_id, 'open')
+  expect(injection(inj).consumed).to_be(1)
+  expect(W.switch_record(c.key).state).to_be('done')
+  rex.sleep(0.5)
+  expect(#a:calls()).to_be(1)
   a:close()
 end)
 
@@ -91,7 +109,7 @@ test('F3 the user leaves the form before the first tab opens: not_focused, the p
   local a = app('sw-app-3', {sessions = {c.s}})
   local id, release = hold()
   local _, key = c.form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = c.values}, operation_key = c.key})
-  wait('the held update', function() return store('run/' .. id).value end, 10)
+  wait('the held update', function() return W.rec('run/' .. id).value end, 10)
   -- The user goes to another pane of the session: not the form, and not its source pane (the hub
   -- gives the focus back to a form from its source pane, forms.go).
   local other
@@ -145,7 +163,7 @@ end)
 test('F4 an earlier attempt reads as unknown and never switches again', function()
   local c = prepare()
   local a = app('sw-app-6', {sessions = {c.s}})
-  write({{key = 'switch/' .. W.hex('start/' .. W.part(c.key)), value = {state = 'attempted'}}})
+  W.twrite({{key = 'switch/' .. W.hex('start/' .. W.part(c.key)), value = {state = 'attempted'}}})
   expect(submit(c).status).to_be('succeeded')
   expect(#a:calls()).to_be(0)
   expect(W.switch_record(c.key).state).to_be('unknown')
@@ -171,7 +189,7 @@ test('F5 F6 the form waits and says Starting; the wait expires; the late first t
   local op = c.form:settle(key, 20)
   expect(op.status).to_be('succeeded')
   expect(W.switch_record(c.key).code).to_be('timeout')
-  expect(store('run/' .. id).value.status).to_be('queued')
+  expect(W.rec('run/' .. id).value.status).to_be('queued')
   release()
   W.wait_run(S.alice, id, 'open')
   rex.sleep(1)
@@ -190,9 +208,9 @@ for _, case in ipairs({{'F7 a legacy start record without at', function(v) v.at 
     local id, release = hold()
     local _, key = c.form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = c.values}, operation_key = c.key})
     local rk = W.start_form_key(c.key)
-    local rec = wait('the start record', function() return store(rk).value end, 10)
+    local rec = wait('the start record', function() return W.rec(rk).value end, 10)
     case[2](rec)
-    write({{key = rk, value = rec}})
+    W.twrite({{key = rk, value = rec}})
     release()
     W.wait_run(S.alice, id, 'open')
     expect(c.form:settle(key, 20).status).to_be('succeeded')
@@ -210,7 +228,7 @@ end
 test('F1 a hub restart while the form waits: the same operation replays the run and decides once', function()
   local c = prepare()
   local id = W.next_run_id()
-  local inj = inject({match = {updates = 'run/' .. id}, fail = 'held by the test', times = 'always'})
+  local inj = inject({match = {sql_commit_writes = 'runs'}, skip = 1, fail = 'held by the test', times = 'always'})
   local _, key = c.form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = c.values}, operation_key = c.key})
   wait('the held update', function() return injection(inj).consumed >= 1 end, 10)
   hub:restart() -- ends the hold (injections are hub state)

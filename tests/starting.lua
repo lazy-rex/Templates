@@ -17,10 +17,10 @@ local function waiting(name, op_key)
   local values = W.form_input(form:render(), 'start_session')
   values.template, values.root, values.session_id = name, root, '@new'
   local id = W.next_run_id()
-  local hold = inject({match = {updates = 'run/' .. id}, fail = 'held by the test', times = 'always'})
+  local hold = inject({match = {sql_commit_writes = 'runs'}, skip = 1, fail = 'held by the test', times = 'always'})
   local _, key = form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = op_key})
   wait('the waiting form', function() return node(form:render(), 'starting') end, 10)
-  return form, key, hold, 'switch/' .. W.hex(store('run/' .. id).value.request.key)
+  return form, key, hold, 'switch/' .. W.hex(W.rec('run/' .. id).value.request.key)
 end
 
 -- The reviewer's probe (item 8 review): a definite error ends the operation, and the form no
@@ -28,7 +28,7 @@ end
 test('a poll that fails with a definite error clears Starting', function()
   local a = app('starting-definite', {sessions = {}})
   local form, key, hold, switch = waiting('st-definite', 'st-definite')
-  inject({match = {writes = switch}, fail = 'switch record write refused', fail_code = 'invalid_input'})
+  inject({match = {sql_commit_writes = 'switches'}, fail = 'switch record write refused', fail_code = 'invalid_input'})
   local op = form:settle(key, 10)
   cancel_injection(hold)
   a:close()
@@ -43,7 +43,7 @@ end)
 test('a poll that fails with a transient error keeps Starting; the operation then succeeds', function()
   local a = app('starting-transient', {sessions = {}})
   local form, key, hold, switch = waiting('st-transient', 'st-transient')
-  local gate = inject({match = {writes = switch}, fail = 'switch record write unavailable', fail_code = 'unavailable', times = 'always'})
+  local gate = inject({match = {sql_commit_writes = 'switches'}, fail = 'switch record write unavailable', fail_code = 'unavailable', times = 'always'})
   wait('a refused switch write', function() return injection(gate).consumed >= 1 or nil end, 15)
   expect(operation(key).status).to_be('pending')
   expect(node(form:render(), 'starting')).not_to_be(nil)
@@ -54,7 +54,7 @@ test('a poll that fails with a transient error keeps Starting; the operation the
   cancel_injection(hold)
   a:close()
   expect(op.status).to_be('succeeded')
-  expect(store(switch).value.state).to_be('refused')
+  expect(W.rec(switch).value.state).to_be('refused')
   -- The success result opens the panel in the form's place (its panel effect), so the form view
   -- is gone; its waiting state ended with the result (start_poll).
   expect(op.result.panel.route).to_be('/panels/templates')

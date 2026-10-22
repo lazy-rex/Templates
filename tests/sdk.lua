@@ -1,38 +1,34 @@
 -- The Plugin SDK port (docs/sdk-port.md, "Stage 1" and "Stage 2"). The SDK registers the plugin
--- and dispatches the hub calls. Stage 2, slice 1 keeps the templates and the save and delete
--- operations in SQL (templates_sql.lua): no hub.store call reads or writes them after the import.
--- An agent can call an export directly: the SDK identifies it from the requester PID that Rex gives.
+-- and dispatches the hub calls. Stage 2 keeps every Templates record in SQL (templates_sql.lua):
+-- after the import, no hub.store call. An agent can call an export directly: the SDK identifies it
+-- from the requester PID that Rex gives.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
--- no_template_store_after checks the plugin's hub calls after seq base (the complete record: no
--- call dropped): no hub.store call names a template record or a save or delete operation. It
--- returns the number of hub.sql calls.
-local function no_template_store_after(base)
+-- sql_only_after checks the plugin's hub calls after seq base (the complete record: no call
+-- dropped): no hub.store call, and no call other than hub.sql while a transaction is open (from
+-- hub.sql.begin to its commit or rollback; Rex Lua runs one handler at a time, so a call in that
+-- interval is a call of the handler that holds the transaction). It returns the number of hub.sql
+-- calls and the number of transactions.
+local function sql_only_after(base)
   local list, out = calls('', {after = base})
   expect(out.dropped).to_be(false)
-  local bad, n = {}, 0
-  local function check(action, key)
-    if type(key) == 'string' and (key:sub(1, 9) == 'template/' or key:match('^save/') or key:match('^delete/')) then
-      bad[#bad + 1] = action .. ' ' .. key
-    end
-  end
+  local bad, n, txs, open = {}, 0, 0, false
   for _, c in ipairs(list) do
-    local a = c.args or {}
-    if c.action:sub(1, 8) == 'hub.sql.' then n = n + 1 end
-    if c.action == 'hub.store.scan' then check(c.action, a.prefix or 'template/') end
-    if c.action == 'hub.store.get' then for _, k in ipairs(a.keys or {}) do check(c.action, k) end end
-    if c.action == 'hub.store.op' then check(c.action, a.key) end
-    if c.action == 'hub.store.batch' then
-      for _, op in ipairs(a.ops or {}) do check(c.action, op.key) end
-      if a.op then check(c.action, a.op.key) end
+    if c.action:sub(1, 8) == 'hub.sql.' then
+      n = n + 1
+      if c.action == 'hub.sql.begin' then open, txs = true, txs + 1 end
+      if c.action == 'hub.sql.commit' or c.action == 'hub.sql.rollback' then open = false end
+    else
+      if c.action:sub(1, 10) == 'hub.store.' then bad[#bad + 1] = c.action end
+      if open then bad[#bad + 1] = c.action .. ' in a transaction' end
     end
   end
   expect(bad).to_equal({})
-  return n
+  return n, txs
 end
 
-test('templates and their operations use SQL only: agent actions, a start, the panel and the Save form', function()
+test('every record uses SQL only, with no other hub call in a transaction: agent actions, starts, a dismiss, a retry, the panel and the Save form', function()
   local alice = agent('alice')
   local s, root = W.workspace()
   local _, base = calls('')
@@ -43,13 +39,16 @@ test('templates and their operations use SQL only: agent actions, a start, the p
   local r = alice:call('templates.start', {template = 'sdk-a', root = root, new_session = 'sdk a', key = 'sdk-start'})
   W.wait_run(alice, r.run_id, 'open')
   alice:call('templates.runs', {})
+  expect(alice:call('templates.retry', {run_id = r.run_id, key = 'sdk-retry'}).woken).to_be(false)
+  expect_error(function() alice:call('templates.dismiss', {run_id = r.run_id, key = 'sdk-dismiss'}) end, 'conflict')
   W.panel(s):render()
   local form = W.open('save_template', '/forms/save', s)
   local values = W.form_input(form:render(), 'save_template')
   values.name, values.root = 'sdk-u', root
   expect(form:action('save_template', 'submit', {values = values}, 'sdk-ui-save').status).to_be('succeeded')
   alice:call('templates.delete', {template = 'sdk-a', key = 'sdk-del'})
-  expect(no_template_store_after(base.next) > 0).to_be(true)
+  local n, txs = sql_only_after(base.next)
+  expect(n > 0 and txs > 0).to_be(true)
 end)
 
 test('a direct call and a forwarded call of one agent share its keys; an unknown peer is refused', function()

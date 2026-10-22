@@ -271,7 +271,7 @@ test('a running start keeps its frozen template after a replacement', function()
   alice:call('templates.retry', {run_id = r.run_id, key = 'rp-run-retry'})
   local run = W.wait_run(alice, r.run_id, 'open')
   local labels = {}
-  for _, w in ipairs(rex.call('session.view', {session_id = store('run/' .. r.run_id).value.session_id}).windows) do labels[#labels + 1] = w.label end
+  for _, w in ipairs(rex.call('session.view', {session_id = W.rec('run/' .. r.run_id).value.session_id}).windows) do labels[#labels + 1] = w.label end
   expect(labels).to_equal({'code', 'logs'})
   expect(run.tabs).to_be(2)
 end)

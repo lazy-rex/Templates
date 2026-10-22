@@ -11,7 +11,7 @@ local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local function big_runs(first, last, pad)
   local root = W.real(W.HOME)
   for i = first, last do
-    write({{key = 'run/' .. i, value = {id = tostring(i), status = 'open', next_tab = 2, root = root,
+    W.twrite({{key = 'run/' .. i, value = {id = tostring(i), status = 'open', next_tab = 2, root = root,
       tabs = {{key = 'templates/' .. i .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
       request = {key = 'big' .. i, root = root, new_session_name = 'big' .. i, template = {v = 1, name = 'big' .. i, tabs = {}}},
       results = {}, session_key = 'templates/' .. i .. '/session', pad = string.rep('<', pad)}}})
@@ -81,13 +81,13 @@ end)
 test('a queued run behind more than 1 MiB of runs resumes after a hub restart', function()
   local root = W.real(W.HOME)
   big_runs(2001, 2018, 10000)
-  write({{key = 'run/2019', value = {id = '2019', status = 'queued', next_tab = 1, root = root,
+  W.twrite({{key = 'run/2019', value = {id = '2019', status = 'queued', next_tab = 1, root = root,
     tabs = {{key = 'templates/2019/tab/1', title = 'resumed', layout = {shell = true, cwd = root}}},
     request = {key = 'resume-2019', root = root, new_session_name = 'resumed', template = {v = 1, name = 'resumed', tabs = {}}},
     results = {}, session_key = 'templates/2019/session'}}})
   hub:restart()
   local run = wait('run 2019 open', function()
-    local r = store('run/2019').value
+    local r = W.rec('run/2019').value
     return r and r.status == 'open' and r or nil
   end, 30)
   local windows = rex.call('session.view', {session_id = run.session_id}).windows

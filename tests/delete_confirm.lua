@@ -163,7 +163,7 @@ test('Start session… starts the template of the row\'s key, not of its value.n
   values.root, values.session_id = root, '@new'
   local op = form:action('start_session', 'submit', {values = values}, 'pd-a-submit')
   expect(op.status).to_be('succeeded')
-  expect(store('run/' .. op.result.run_id).value.request.template.tabs[1].title).to_be('a-tab')
+  expect(W.rec('run/' .. op.result.run_id).value.request.template.tabs[1].title).to_be('a-tab')
 end)
 
 -- A key whose name is not valid UTF-8 cannot be an option (its JSON round trip changes it). The

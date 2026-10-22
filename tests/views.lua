@@ -19,10 +19,10 @@ local function seed(first, last, status, err_len)
       request = {key = 'view' .. i, root = root, session_id = 'session:none', template = {v = 1, name = 'view' .. i, tabs = {}}},
       results = {}, session_key = 'templates/' .. i .. '/session', error = string.rep('e', err_len or 0)}
     local cost = #rex.json.encode(run)
-    if #ops > 0 and n + cost > 40000 then write(ops); ops, n = {}, 0 end
+    if #ops > 0 and n + cost > 40000 then W.twrite(ops); ops, n = {}, 0 end
     ops[#ops + 1], n = {key = 'run/' .. i, value = run}, n + cost
   end
-  if #ops > 0 then write(ops) end
+  if #ops > 0 then W.twrite(ops) end
 end
 local function count(n, one, many) return n .. ' ' .. (n == 1 and one or many) end
 -- check_panel checks the size, the pairs of rows of each blocked start, and the exact hidden
@@ -163,7 +163,7 @@ test('the waiting Start form stays under the budget', function()
   values.template, values.root, values.session_id = 'aaa-wait', root, '@new'
   local ap = app('views-app', {sessions = {s}})
   local id = W.next_run_id()
-  local inj = inject({match = {updates = 'run/' .. id}, fail = 'held by the test', times = 'always'})
+  local inj = inject({match = {sql_commit_writes = 'runs'}, skip = 1, fail = 'held by the test', times = 'always'})
   local _, key = form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = 'views-start-wait'})
   local tree = wait('the waiting form', function()
     local t = form:render()

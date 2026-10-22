@@ -50,11 +50,11 @@ test('a switch notice over the budget is left out, and its start is counted', fu
   local s = W.workspace()
   local root = W.real(W.HOME)
   local name = string.rep('<', 9000)
-  write({{key = 'run/7001', value = {id = '7001', status = 'open', next_tab = 2, root = root,
+  W.twrite({{key = 'run/7001', value = {id = '7001', status = 'open', next_tab = 2, root = root,
     tabs = {{key = 'templates/7001/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
     request = {key = 'huge-notice', root = root, new_session_name = 'n', template = {v = 1, name = name, tabs = {}}},
     results = {}, session_key = 'templates/7001/session'}}})
-  write({{key = 'switch/' .. W.hex('huge-notice'), value = {state = 'refused', code = 'no_app'}}})
+  W.twrite({{key = 'switch/' .. W.hex('huge-notice'), value = {state = 'refused', code = 'no_app'}}})
   local panel = W.panel(s):render()
   expect(size(panel) <= BUDGET).to_be(true)
   expect(node(panel, 'switch')).to_be(nil)
@@ -68,7 +68,7 @@ test('a stuck start over the budget is counted, and a smaller one is shown', fun
   local s = W.workspace()
   local root = W.real(W.HOME)
   for _, r in ipairs({{id = '7003', err = string.rep('<', 9000)}, {id = '7002', err = 'small'}}) do
-    write({{key = 'run/' .. r.id, value = {id = r.id, status = 'pending', next_tab = 1, root = root,
+    W.twrite({{key = 'run/' .. r.id, value = {id = r.id, status = 'pending', next_tab = 1, root = root,
       tabs = {{key = 'templates/' .. r.id .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
       request = {key = 'stuck' .. r.id, root = root, session_id = 'session:none', template = {v = 1, name = 's' .. r.id, tabs = {}}},
       results = {}, session_key = 'templates/' .. r.id .. '/session', error = r.err}}})

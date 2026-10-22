@@ -3,9 +3,10 @@
 -- in the tab's layout. "Save as Template…" captures a session; "Start Session…" starts a template
 -- in any root. The engine (templates_run.lua) owns durable starts; this file owns capture, the
 -- forms, the panel and the adapter to hub.spawn_window.
--- The Plugin SDK (LazyRex sdk/lua) registers the plugin and dispatches the hub calls. The data
--- stays in hub.store: each action and view has {tx = false, store = false}, so the SDK makes no
--- hub.sql call and saves no reply (docs/sdk-port.md, stage 1).
+-- The Plugin SDK (LazyRex sdk/lua) registers the plugin and dispatches the hub calls. Each action
+-- and view has {tx = false, store = false}: the SDK opens no transaction around a handler and saves
+-- no reply. The data is in SQL (templates_sql.lua; docs/sdk-port.md, stage 2): each step opens its
+-- own short transactions, and Templates keeps its own operation replies (ops, start_forms).
 local app = require('lazyrex').plugin('templates')
 local function fail(code, message) error({code = code, message = message}) end
 local function text(value, name)
@@ -222,27 +223,6 @@ local function capture(session_id)
   return result
 end
 
--- scan_all returns the values (tables) of every record under prefix. A page that is too large for
--- a hub reply is asked for again with a smaller limit (templates_run.lua, "Store scans").
-local function scan_all(prefix)
-  local list, after, limit = {}, nil, run_module.SCAN_LIMIT
-  repeat
-    local args = {prefix = prefix, limit = limit}
-    if after then args.after = after end
-    local ok, page = pcall(hub, 'hub.store.scan', args)
-    if ok then
-      for _, record in pairs(page.records or {}) do
-        if type(record.value) == 'table' then list[#list + 1] = record.value end
-      end
-      after = page.next
-    else
-      limit = run_module.smaller(limit, page)
-      if not limit then error(page, 0) end
-    end
-  until ok and not after
-  return list
-end
-
 -- Storage: the SQL row templates(hex, rev, value) with value {v = 1, name, tabs, saved_by} as JSON
 -- (templates_sql.lua). hex is the hex of the name (the old store key was "template/" .. hex), so any
 -- name is a valid key. A template's identity is its hex: value.name can differ in a row that
@@ -375,7 +355,7 @@ local function to_layout(node, cap, launches, root, labels)
 end
 
 -- values_fingerprint covers the submitted values and the source session in a stable order, so a
--- retry finds its saved result before anything live (the session, the root, the store) is read.
+-- retry finds its saved result before anything live (the session, the root, the rows) is read.
 local function values_fingerprint(prefix, context, values)
   local keys = {}
   for k in pairs(values) do keys[#keys + 1] = tostring(k) end
@@ -412,10 +392,10 @@ end
 
 -- Operation keys. The UI keeps its key format: '<kind>/' .. part(view key) (part starts with a
 -- digit). An agent key is '<kind>/agent/' .. part(agent ID) .. part(key), so the two can never be
--- equal. op_keys lists the store keys to look up for a caller: one per ID of the agent.
+-- equal. op_keys lists the operation keys to look up for a caller: one per ID of the agent.
 local function op_keys(kind, caller, key)
   text(key, caller.id == 'user' and 'operation key' or 'key')
-  -- Bounded: dismiss and retry commit the key in the batch of a run record (templates_run.lua).
+  -- Bounded: dismiss and retry write the key with a run record (templates_run.lua, size bounds).
   if #key > run_module.MAX_KEY or key:find('%c') then
     fail('invalid_input', 'A key is at most ' .. run_module.MAX_KEY .. ' bytes, without control characters')
   end
@@ -425,14 +405,11 @@ local function op_keys(kind, caller, key)
   return list
 end
 -- prior_op returns the saved result of the first key that has one (the caller's current ID
--- first), or nil. Two IDs of one agent that both saved the key are a conflict. A save or a delete
--- reads its operation from SQL (sql.SQL_KINDS); the other kinds from hub.store.
+-- first), or nil. Two IDs of one agent that both saved the key are a conflict. The operations are
+-- SQL rows (templates_sql.lua, ops).
 local function saved_op(k)
-  if sql.kind_in_sql(k) then
-    local op = data.get_op(k)
-    return op and {found = true, fingerprint = op.fingerprint, result = op.result} or {found = false}
-  end
-  return hub('hub.store.op', {key = k})
+  local op = data.get_op(k)
+  return op and {found = true, fingerprint = op.fingerprint, result = op.result} or {found = false}
 end
 local function prior_op(keys, fingerprint)
   local found, result = 0, nil
@@ -689,8 +666,6 @@ local invalidate
 -- errors in the handlers that call pump (LazyRex docs/rex-protocol.md, "Rex Lua runtime"). The
 -- engine's maintenance timer calls loop.pump.
 local loop = {timer = nil, pump = nil}
-local function form_key(key) return 'start-form/' .. hex(key) end
-local function switch_key(start_key) return 'switch/' .. hex(start_key) end
 -- SWITCH_WAIT: the Start form's switch wait (switch_app). A run with a form that can still switch
 -- is retired only after its switch decision, or SWITCH_WAIT + SWITCH_GRACE seconds after the
 -- form's submit (switch_settled, templates_run.lua). The grace is a policy delay, not proof that
@@ -701,7 +676,7 @@ local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = 
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   log = function(line) print('templates: ' .. line) end,
   changed = function() if invalidate then pcall(invalidate) end end,
-  form_key = form_key, switch_key = switch_key, wake = function() if loop.pump then loop.pump() end end,
+  data = data, transaction = app.db.transaction, wake = function() if loop.pump then loop.pump() end end,
   retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end})
 -- start_size measures four references (engine.measure): a user and an agent start, each into a new
 -- and an existing session. The keys are built as op_keys builds them, with the longest agent ID
@@ -752,37 +727,47 @@ end
 -- so a crash or lost answer after it reads as 'unknown' and never switches again. An agent's
 -- start never switches the app: it has no form.
 local starting = {} -- view_id -> true while its start form waits (render only)
+-- The switches row of the start key holds the decision. A state check replaces a revision check:
+-- a row is inserted only where none exists (in one transaction with the read), and only an
+-- 'attempted' row changes (settle_switch). A lost commit reply of the final state is safe: the next
+-- call reads the row, keeps 'done', 'refused' or 'unknown', and turns only 'attempted' into
+-- 'unknown'. select_session never runs twice for one start key.
 local function switch_app(view_id, start_key, run_id, at)
-  local skey = switch_key(start_key)
-  local saved = hub('hub.store.get', {keys = {skey}}).records[skey]
-  if saved and type(saved.value) == 'table' then
-    if saved.value.state ~= 'attempted' then return saved.value end
+  local saved = data.get_switch(start_key)
+  if saved then
+    if saved.state ~= 'attempted' then return saved end
     local value = {state = 'unknown', message = 'The outcome of the switch is unknown'}
-    local stored = hub('hub.store.batch', {ops = {{key = skey, if_rev = saved.rev, value = value}}})
-    if stored.conflict then return switch_app(view_id, start_key, run_id, at) end
-    return value
+    if data.settle_switch(start_key, value) then return value end
+    -- Another call decided first (or the run was retired): its row is the decision.
+    return data.get_switch(start_key) or value
   end
-  local function decide(value)
-    local stored = hub('hub.store.batch', {ops = {{key = skey, if_rev = '0', value = value}}})
-    if stored.conflict then return switch_app(view_id, start_key, run_id, at) end
+  -- first writes the first state of the decision if there is no row yet. With a row (another call
+  -- wrote it first), that row decides, as above.
+  local function first(value)
+    local inserted = app.db.transaction(function()
+      if data.get_switch(start_key) then return false end
+      data.insert_switch(start_key, value)
+      return true
+    end)
+    if not inserted then return switch_app(view_id, start_key, run_id, at) end
     return value
   end
   -- Expiry comes first: a recovered or legacy start (no at) never switches late, even when its
   -- first tab is open now (Codex's review).
   if os.time() - at >= SWITCH_WAIT then
-    return decide({state = 'refused', code = 'timeout', message = 'The automatic-switch wait (' .. SWITCH_WAIT .. ' s) expired'})
+    return first({state = 'refused', code = 'timeout', message = 'The automatic-switch wait (' .. SWITCH_WAIT .. ' s) expired'})
   end
   local run = engine.get(run_id)
-  local first = run.results and run.results[1]
-  if type(first) ~= 'table' or first.status ~= 'open' or type(first.window_id) ~= 'string' or first.window_id == '' or not run.session_id then
+  local tab = run.results and run.results[1]
+  if type(tab) ~= 'table' or tab.status ~= 'open' or type(tab.window_id) ~= 'string' or tab.window_id == '' or not run.session_id then
     if run.status ~= 'queued' and run.status ~= 'starting' then
-      return decide({state = 'refused', code = 'not_started', message = 'The first tab did not open'})
+      return first({state = 'refused', code = 'not_started', message = 'The first tab did not open'})
     end
     return nil
   end
-  local stored = hub('hub.store.batch', {ops = {{key = skey, if_rev = '0', value = {state = 'attempted'}}}})
-  if stored.conflict then return switch_app(view_id, start_key, run_id, at) end
-  local ok, err = pcall(hub, 'hub.app.select_session', {view_id = view_id, session_id = run.session_id, window_id = first.window_id})
+  local attempted = first({state = 'attempted'})
+  if attempted.state ~= 'attempted' then return attempted end
+  local ok, err = pcall(hub, 'hub.app.select_session', {view_id = view_id, session_id = run.session_id, window_id = tab.window_id})
   local value = {state = 'done'}
   if not ok then
     local code = type(err) == 'table' and err.code or 'unavailable'
@@ -790,33 +775,34 @@ local function switch_app(view_id, start_key, run_id, at)
     value = {state = refused and 'refused' or 'unknown', code = code, message = type(err) == 'table' and err.message or tostring(err)}
   end
   -- A failed write leaves 'attempted', which a later read turns into 'unknown'.
-  pcall(hub, 'hub.store.batch', {ops = {{key = skey, if_rev = stored.revs[skey], value = value}}})
+  pcall(data.settle_switch, start_key, value)
   return value
 end
 
 -- start_core admits a start for a caller. It freezes the engine request under the operation key
--- before admission, so a retry after a lost reply admits the same request even if the template
--- was edited or deleted since. intent = {template, root, session_id | new_session_name,
--- placement?}. An agent's start also gets the grant of its exact tab requests, in the agent's
--- call (caller.pid); the run dispatches nothing before it (templates_run.lua).
+-- (a start_forms row) in the admission transaction, so a retry after a lost reply admits the same
+-- request even if the template was edited or deleted since. The transaction checks that the form
+-- is still the one read here (rev and fingerprint), after the directory checks. intent =
+-- {template, root, session_id | new_session_name, placement?}. An agent's start also gets the
+-- grant of its exact tab requests, in the agent's call (caller.pid); the run dispatches nothing
+-- before it (templates_run.lua).
 local function start_core(caller, key, fingerprint, intent)
-  local record_key, marker_key = form_key(key), 'run-key/' .. key
-  local request, at
-  local got = hub('hub.store.get', {keys = {record_key, marker_key}}).records
-  local saved = got[record_key]
-  -- A record whose retired run's marker has expired counts as absent (before the fingerprint
-  -- check): the key starts a new run, and the new record replaces it (if_rev).
-  if saved and type(saved.value) == 'table' and not run_module.form_expired(saved, got[marker_key], os.time()) then
-    if saved.value.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
+  local request, at, form
+  local saved, marker = data.get_form(key), data.get_run_key(key)
+  -- A form whose retired run's marker has expired counts as absent (before the fingerprint
+  -- check): the key starts a new run, and the new form replaces it.
+  if saved and not run_module.form_expired(saved, marker, os.time()) then
+    if saved.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
     -- A Start form that runs again after its run was retired (a late poll, or the operation again
     -- after a hub restart) gets that run's ID: no new run, no switch. The marker must name this
     -- form record (form_rev). An agent's replay gets expired (engine.admit).
-    local m = got[marker_key] and got[marker_key].value
-    if caller.id == 'user' and type(m) == 'table' and m.expired_at ~= nil and m.form_rev ~= nil and m.form_rev == saved.rev then
-      return saved.value.request, {id = m.id, retired = true}
+    local m = marker
+    if caller.id == 'user' and m and m.expired_at ~= nil and m.form_rev ~= nil and m.form_rev == saved.rev then
+      return saved.request, {id = m.run_id, retired = true}
     end
-    -- A record from before the switch has no time: its wait is over.
-    request, at = saved.value.request, type(saved.value.at) == 'number' and saved.value.at or 0
+    -- A form from before the switch has no time: its wait is over.
+    request, at = saved.request, type(saved.at) == 'number' and saved.at or 0
+    form = {expect = saved}
   else
     -- Checked before the frozen request is written: the run repeats the session ID in each tab.
     if intent.session_id ~= nil and not run_module.valid_id(intent.session_id) then fail('invalid_input', 'Invalid session ID') end
@@ -827,10 +813,10 @@ local function start_core(caller, key, fingerprint, intent)
     else request.new_session_name = intent.new_session_name or tpl.name end
     if caller.id ~= 'user' then request.by = caller.id end
     at = os.time()
-    local stored = hub('hub.store.batch', {ops = {{key = record_key, if_rev = saved and saved.rev or '0', value = {fingerprint = fingerprint, request = request, at = at}}}})
-    if stored.conflict then fail('conflict', 'This start is being submitted twice; retry with the same key') end
+    -- An expired form (saved) is replaced; else the key has no form.
+    form = {expect = saved or false, write = {fingerprint = fingerprint, request = request, at = at}}
   end
-  local run = engine.admit(request)
+  local run = engine.admit(request, form)
   if run.request.by and run.grant_id == nil then
     if run.status == 'authorizing' then
       if not caller.pid then fail('refused', 'Only the agent that started the run can authorize it') end
@@ -908,16 +894,10 @@ local function agent_start(caller, args)
   -- A start of another ID of this agent with this key is the same operation (its record). Two IDs
   -- that both started with the key are a conflict, also with equal arguments (prior_op).
   local key, found = keys[1], 0
-  local records = {}
   for _, k in ipairs(keys) do
-    records[#records + 1] = form_key(k)
-    records[#records + 1] = 'run-key/' .. k
-  end
-  local got = hub('hub.store.get', {keys = records}).records
-  for _, k in ipairs(keys) do
-    -- A record whose retired run's marker has expired does not count (start_core).
-    local r = got[form_key(k)]
-    if r and r.value ~= nil and not run_module.form_expired(r, got['run-key/' .. k], os.time()) then
+    -- A form whose retired run's marker has expired does not count (start_core).
+    local f = data.get_form(k)
+    if f and not run_module.form_expired(f, data.get_run_key(k), os.time()) then
       found = found + 1
       if found == 1 then key = k end
     end
@@ -928,11 +908,14 @@ local function agent_start(caller, args)
   return {run_id = run.id}
 end
 
--- Templates panel: saved templates and recent starts.
-local function recent_runs()
-  local runs = scan_all('run/')
-  table.sort(runs, function(a, b) return #a.id > #b.id or #a.id == #b.id and a.id > b.id end)
-  return runs
+-- Templates panel: saved templates and recent starts. The run status classes (also in
+-- templates_run.lua): stuck runs have Retry or Dismiss; finished runs dispatch nothing more.
+local STUCK, FINISHED = {'blocked', 'pending', 'unknown', 'authorizing'}, {'open', 'failed', 'closed', 'dismissed'}
+-- runs_of returns the runs that data.each_run gives for opts, newest first.
+local function runs_of(opts)
+  local list = {}
+  data.each_run(opts, function(run) list[#list + 1] = run end)
+  return list
 end
 local function run_detail(r)
   local done = (r.next_tab or 1) - 1
@@ -946,12 +929,10 @@ local switch_reasons = {
   no_app = 'no Rex app shows the session of the form',
   ambiguous_app = 'more than one Rex app shows the session of the form',
 }
-local function switch_notice(runs)
-  local r = runs[1]
+local function switch_notice()
+  local r = runs_of({limit = 1})[1]
   if not r or not r.request.new_session_name or r.request.by then return nil end
-  local skey = switch_key(r.request.key)
-  local saved = hub('hub.store.get', {keys = {skey}}).records[skey]
-  local sw = saved and type(saved.value) == 'table' and saved.value
+  local sw = data.get_switch(r.request.key)
   if not sw or sw.state == 'done' or sw.code == 'not_started' then return nil end
   local name, session = r.request.template.name, '"' .. r.request.new_session_name .. '"'
   if sw.state ~= 'refused' then
@@ -1014,7 +995,7 @@ local function more_runs_text(unfinished, done)
 end
 local function more_templates_text(n) return count(n, 'more template', 'more templates') .. ': use templates.list' end
 local function render_panel()
-  local list, runs = templates(), recent_runs()
+  local list = templates()
   local template_items, stuck_items, recent_items = {}, {}, {}
   local start = {id = 'start', type = 'widget', text = '', action = {name = 'start', label = 'Start Session…', enabled = #list > 0, user_only = 'navigation'}}
   local save = {id = 'save', type = 'widget', text = '', action = {name = 'save', label = 'Save this session as a template…', enabled = true, user_only = 'navigation'}}
@@ -1028,23 +1009,25 @@ local function render_panel()
   local budget = {size = json_size(reply)}
   if budget.size > VIEW_BUDGET then return too_large_view('Templates') end
   -- The notice goes before the other nodes: its comma is counted with it (extra = 1).
-  local text = switch_notice(runs)
+  local text = switch_notice()
   local notice = text and {id = 'switch', type = 'widget', text = text}
   if notice and not add(budget, {}, {notice}, 1) then notice = nil end
-  local shown = {}
-  for _, r in ipairs(runs) do
-    if stuck(r) then
-      -- The label names the action, as the home's failed workers do ("· Dismiss").
-      local label, detail = r.request.template.name .. ' in ' .. short(r.root), run_detail(r)
-      local rows = {}
-      if r.status == 'blocked' then
-        rows[1] = {id = 'retry:' .. r.id, label = label .. ' · Retry', detail = detail,
-          action = {name = 'retry', label = 'Retry', enabled = true, tool = 'templates.retry'}}
-      end
-      rows[#rows + 1] = {id = 'dismiss:' .. r.id, label = label .. ' · Dismiss', detail = detail,
-        action = {name = 'dismiss', label = 'Dismiss', enabled = true, tool = 'templates.dismiss'}}
-      if add(budget, stuck_items, rows) then shown[r.id] = true end
+  -- Separate queries (a render reads without a transaction, so they are not one snapshot): every
+  -- stuck run, the 10 newest other runs, and the counts of each class. shown counts the runs
+  -- shown in each class; the hidden counts are the class totals minus those.
+  local shown = {finished = 0, other = 0}
+  local function show(r) if finished(r) then shown.finished = shown.finished + 1 else shown.other = shown.other + 1 end end
+  for _, r in ipairs(runs_of({statuses = STUCK})) do
+    -- The label names the action, as the home's failed workers do ("· Dismiss").
+    local label, detail = r.request.template.name .. ' in ' .. short(r.root), run_detail(r)
+    local rows = {}
+    if r.status == 'blocked' then
+      rows[1] = {id = 'retry:' .. r.id, label = label .. ' · Retry', detail = detail,
+        action = {name = 'retry', label = 'Retry', enabled = true, tool = 'templates.retry'}}
     end
+    rows[#rows + 1] = {id = 'dismiss:' .. r.id, label = label .. ' · Dismiss', detail = detail,
+      action = {name = 'dismiss', label = 'Dismiss', enabled = true, tool = 'templates.dismiss'}}
+    if add(budget, stuck_items, rows) then show(r) end
   end
   local hidden_templates = 0
   for _, t in ipairs(list) do
@@ -1058,20 +1041,14 @@ local function render_panel()
     end
     if not add(budget, template_items, {item}) then hidden_templates = hidden_templates + 1 end
   end
-  local others = 0
-  for _, r in ipairs(runs) do
-    if not stuck(r) and others < 10 then
-      others = others + 1
-      local item = {id = r.id, label = r.request.template.name .. ' in ' .. short(r.root), detail = run_detail(r)}
-      if add(budget, recent_items, {item}) then shown[r.id] = true end
-    end
+  for _, r in ipairs(runs_of({statuses = STUCK, exclude = true, limit = 10})) do
+    local item = {id = r.id, label = r.request.template.name .. ' in ' .. short(r.root), detail = run_detail(r)}
+    if add(budget, recent_items, {item}) then show(r) end
   end
-  local hidden_unfinished, hidden_finished = 0, 0
-  for _, r in ipairs(runs) do
-    if not shown[r.id] then
-      if finished(r) then hidden_finished = hidden_finished + 1 else hidden_unfinished = hidden_unfinished + 1 end
-    end
-  end
+  local n_finished, n_all = data.count_runs(FINISHED)
+  -- A run that changed class between the queries can make a difference negative: it counts 0.
+  local hidden_finished = math.max(0, n_finished - shown.finished)
+  local hidden_unfinished = math.max(0, n_all - n_finished - shown.other)
   local display = {}
   if notice then display[1] = notice end
   display[#display + 1] = start
@@ -1303,7 +1280,7 @@ local function dismiss_core(caller, keys, id)
   local prior = prior_op(keys, fingerprint)
   if prior then return prior end
   find_run(id)
-  -- The dismissed state and the operation result commit in one batch (engine.dismiss).
+  -- The dismissed state and the operation result commit in one transaction (engine.dismiss).
   local ok, err = pcall(engine.dismiss, id, {key = keys[1], fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
   if not ok then
     if type(err) == 'table' and err.code == 'op_exists' then return prior_op(keys, fingerprint) end
@@ -1392,10 +1369,9 @@ local function run_view(r)
 end
 -- templates.runs pages. A plugin reply over 64 KiB never arrives (LazyRex docs/rex-protocol.md,
 -- "Rex Lua runtime"), so one page, encoded as the reply carries it, is at most RUNS_BUDGET bytes.
--- Run IDs are decimal text (up to 32 digits): they compare by length, then as text, which is exact
--- beyond 2^53. before is a canonical ID (no leading zero); the page holds runs older than it.
+-- Run IDs are decimal text (up to 32 digits): SQL orders them by length, then as text, which is
+-- exact beyond 2^53 (templates_sql.lua, each_run). before is a canonical ID (no leading zero); the page holds runs older than it.
 local RUNS_BUDGET, RUNS_LIMIT, RUNS_MAX = 40 * 1024, 50, 100
-local function older(a, b) return #a < #b or #a == #b and a < b end
 local function run_page(before, limit)
   if limit == nil then limit = RUNS_LIMIT end
   if type(limit) ~= 'number' or limit % 1 ~= 0 or limit < 1 or limit > RUNS_MAX then
@@ -1407,20 +1383,19 @@ local function run_page(before, limit)
   -- The reply is {"runs":[v1,...],"next_before":"<ID>"}: at most 64 bytes of names, brackets and a
   -- 32-digit cursor, plus each view and its comma.
   local page, size, next_before = {}, 64, nil
-  for _, r in ipairs(recent_runs()) do
-    if before == nil or older(r.id, before) then
-      if #page == limit then next_before = page[#page].id break end
-      local view = run_view(r)
-      local n = json_size(view) + 1
-      if size + n > RUNS_BUDGET then
-        if #page == 0 then
-          fail('too_large', 'Run ' .. r.id .. ' is too large to list (' .. n .. ' bytes). For older runs, use before = "' .. r.id .. '".')
-        end
-        next_before = page[#page].id
-        break
+  -- The runs before the cursor, newest first: limit + 1 rows tell whether a next page exists.
+  for _, r in ipairs(runs_of({before = before, limit = limit + 1})) do
+    if #page == limit then next_before = page[#page].id break end
+    local view = run_view(r)
+    local n = json_size(view) + 1
+    if size + n > RUNS_BUDGET then
+      if #page == 0 then
+        fail('too_large', 'Run ' .. r.id .. ' is too large to list (' .. n .. ' bytes). For older runs, use before = "' .. r.id .. '".')
       end
-      page[#page + 1], size = view, size + n
+      next_before = page[#page].id
+      break
     end
+    page[#page + 1], size = view, size + n
   end
   return {runs = page, next_before = next_before}
 end

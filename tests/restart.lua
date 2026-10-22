@@ -5,10 +5,11 @@
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
 local function view(s) return rex.call('session.view', {session_id = s}) end
--- skip: changes of the record that pass first (an agent's start authorizes its run: 1).
+-- skip: changes of the run that pass first after its admission (an agent's start authorizes its
+-- run: 1). The admission commit also writes the runs table: it passes too.
 local function hold(skip)
   local id = W.next_run_id()
-  local inj = inject({match = {updates = 'run/' .. id}, skip = skip, fail = 'held by the test', times = 'always'})
+  local inj = inject({match = {sql_commit_writes = 'runs'}, skip = (skip or 0) + 1, fail = 'held by the test', times = 'always'})
   return id, function() wait('the held update of run ' .. id, function() return injection(inj).consumed >= 1 end, 10) end
 end
 local function saved_template(alice, name)
@@ -144,8 +145,8 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   local r = alice:call('templates.start', {template = 'crash-agent', root = root, key = 'restart-agent'})
   expect(r.run_id).to_be(id)
   held()
-  expect(store('run/' .. id).value.status).to_be('queued')
-  expect(type(store('run/' .. id).value.grant_id)).to_be('string')
+  expect(W.rec('run/' .. id).value.status).to_be('queued')
+  expect(type(W.rec('run/' .. id).value.grant_id)).to_be('string')
   hub:restart()
   local run = W.wait_run(alice, id, 'open')
   local panes = workers_in(alice, run.session_id)
@@ -154,7 +155,7 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   -- Any agent stops a pane (decision "Agents may act on anything", 2026-10-19); the pane stays alice's.
   expect(bob:hub('hub.stop', {spawn_id = panes[1].spawn_id}).status).to_be('closed')
   expect(alice:hub('hub.stop', {spawn_id = panes[2].spawn_id}).status).to_be('closed')
-  wait('the revoke of the grant', function() return store('run/' .. id).value.grant_revoked == true end, 20)
+  wait('the revoke of the grant', function() return W.rec('run/' .. id).value.grant_revoked == true end, 20)
 end)
 
 -- A constructed recovery boundary, not an observed live migration. alice reports a conversation,
@@ -170,16 +171,16 @@ test('constructed boundary: a run with a legacy owner and no recorded grant resu
   local id, held = hold(1)
   local r = alice:call('templates.start', {template = 'legacy-owner', root = root, key = 'legacy-start'})
   held()
-  local run = store('run/' .. id).value
+  local run = W.rec('run/' .. id).value
   expect(run.request.by).to_be(current)
   local grant_id = run.grant_id
   expect(type(grant_id)).to_be('string')
   run.grant_id, run.status, run.request.by = nil, 'authorizing', 'alice'
-  write({{key = 'run/' .. id, value = run}})
+  W.twrite({{key = 'run/' .. id, value = run}})
   hub:restart({crash = true})
   local opened = W.wait_run(alice, r.run_id, 'open')
-  expect(store('run/' .. id).value.grant_id).to_be(grant_id)
-  expect(store('run/' .. id).value.request.by).to_be('alice')
+  expect(W.rec('run/' .. id).value.grant_id).to_be(grant_id)
+  expect(W.rec('run/' .. id).value.request.by).to_be('alice')
   local panes = workers_in(alice, opened.session_id)
   expect(#panes).to_be(3)
   for _, w in ipairs(panes) do expect(w.parent).to_be(current) end

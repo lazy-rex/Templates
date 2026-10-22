@@ -50,12 +50,12 @@ local function try(tabs, leaves, n)
   local op = form:action('start_session', 'submit', {values = values}, 'ui-' .. name)
   local ui_status = op.status == 'succeeded' and settled(op.result.run_id) or ('admission ' .. op.status)
   local ui_ok = ui_status == 'open'
-  local run = store('run/' .. ui_id).value
+  local run = W.rec('run/' .. ui_id).value
   -- The agent's start of the same template.
   local ok, r = pcall(S.alice.call, S.alice, 'templates.start', {template = name, root = root, key = 'agent-' .. name})
   local agent_status = ok and settled(r.run_id) or 'refused'
   local agent_ok = agent_status == 'open'
-  local agent_run = ok and store('run/' .. r.run_id).value or nil
+  local agent_run = ok and W.rec('run/' .. r.run_id).value or nil
   print(string.format('limits: %d tab(s) x %d pane(s) x %d B: template %d B, run %s B; user %s, agent %s%s', tabs, leaves, n, size(t),
     run and tostring(size(run)) or '-', ui_status, agent_status,
     ok and '' or (' (' .. tostring(type(r) == 'table' and r.message or r) .. ')')))
@@ -165,7 +165,7 @@ test('an oversized input session ID is refused before the start is written', fun
     a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = 'session:"quoted"', key = 'odd-session'})
   end, 'invalid_input')
   expect(W.next_run_id()).to_be(before)
-  expect(store(W.start_form_key_agent('alice', 'long-session')).value).to_be(nil)
+  expect(W.rec(W.start_form_key_agent('alice', 'long-session')).value).to_be(nil)
 end)
 
 test('a key with a control character is refused', function()

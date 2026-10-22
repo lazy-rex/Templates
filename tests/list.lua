@@ -309,7 +309,7 @@ test('templates.list keeps the JSON type of saved_by', function()
   end
   local hx = W.hex('sb-7')
   W.twrite({{key = 'template/' .. hx, value = tpl('sb-7', 1)}})
-  sql_write('UPDATE templates SET value = ? WHERE hex = ?', {'{"v":1,"name":"sb-7","saved_by":null,"tabs":[]}', hx})
+  W.sql_write('UPDATE templates SET value = ? WHERE hex = ?', {'{"v":1,"name":"sb-7","saved_by":null,"tabs":[]}', hx})
   local got = {}
   for _, t in ipairs(a:call('templates.list', {after = 'sb', limit = 10}).templates) do got[t.name] = t end
   for _, c in ipairs(cases) do expect(got[c[1]].saved_by).to_equal(c[2]) end

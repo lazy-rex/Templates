@@ -37,29 +37,33 @@ local function relative(dir)
     if part == '.' or part == '..' then fail('invalid_input', 'dir cannot contain . or .. segments') end
   end
 end
--- Size bounds. A run record is written whole in one hub.store.batch, and one control message is
--- at most 64 KiB (rex-protocol.md, "Rex Lua runtime"). The record grows after admission, so every
--- field that a later write adds has a bound:
+-- Size bounds. A run record is an SQL row (templates_sql.lua). Its value is written in chunks:
+-- write_text measures each statement as its complete frame (client ID, action, SQL text, every
+-- parameter, the transaction token, the envelope) and cuts the value so that the frame is at most
+-- FRAME_MAX (60 KiB, under the SDK's 64 KiB request limit). MAX_RUN (61 KiB as encoded JSON) stays
+-- the bound of the record, so every field that a later write adds has a bound:
 --   MAX_TEXT: an error text that the run stores (a longer one is cut; the full text goes to the
 --     plugin log through opts.log).
 --   MAX_ID: a session, window, block or grant ID, from the hub or from a request: 1 to MAX_ID
 --     characters of [A-Za-z0-9.:_-] (valid_id), so its JSON is its length + 2. Another value is
 --     refused in a request, and is an invalid result from the hub.
 --   MAX_RUN_ID: the digits of a run ID (the run counter).
+--   MAX_KEY: the key of an operation; with MAX_ID it bounds an operation key (at most 1992 B as
+--     JSON, "<" encoded as 6 bytes) in the statements of dismiss and retry.
 -- Sizes are measured with rex.json.encode, the encoder that writes the record. It encodes "<", ">"
 -- and "&" as 6 bytes, as the hub does (observed on Rex 0.0.1792158932-g88fd41), so a count of the
 -- raw bytes is not a bound.
 -- Admission builds the record at its final size with these bounds (every tab request and result,
--- the IDs, an error at MAX_TEXT_JSON), measures it and refuses a run over MAX_RUN. The other
--- 3 KiB is the envelope of the largest write of a run, as encoded JSON:
---   the client.perform frame (client ID, action, timeout, names): about 200 B;
---   the record op: "run/" + at most 32 digits, an if_rev of at most 20 digits: about 90 B;
---   the operation that dismiss or retry commits with the record (templates.lua): its key is
---   "dismiss/agent/" + part(agent ID) + part(key). An agent ID is at most MAX_ID bytes and a key
---   at most MAX_KEY bytes, without control characters; "<", ">" and "&" encode as 6 bytes, so the
---   key is at most 14 + 4 + 768 + 4 + 1200 + 2 = 1992 B. Its fingerprint is at most 50 B, its
---   result at most 80 B, and the names about 100 B.
--- In all about 2.5 KB (engine.lua measures the frames).
+-- the IDs, an error at MAX_TEXT_JSON), measures it and refuses a run over MAX_RUN.
+-- The frames of one write. As a parameter, the JSON text of a value is encoded once more: a '"' or
+-- a '\' becomes 2 bytes, '<' becomes 7, so a value of at most MAX_RUN is at most 2 * MAX_RUN as a
+-- parameter: at most 3 chunks. The largest transaction is admission (engine.admit): it reads the
+-- run key, the start form and the counter (3 calls), writes the start form (its fingerprint and
+-- its request, each at most 3 chunks), the run key, the counter and the run (at most 3 chunks):
+-- at most 15 hub.sql calls between hub.sql.begin and the commit, and no other hub call. The hub
+-- ends a transaction 5 s after its last call or 10 s after its start (LazyRex docs/sql.md). The
+-- count bounds the calls, not their time: on a slow host the commit can fail (tx_expired), and
+-- then nothing is committed (tests/sql_runs.lua refuses the commit to check that state).
 local MAX_TEXT, MAX_ID, MAX_KEY, MAX_RUN_ID = 512, 128, 200, 32
 local MAX_TEXT_JSON = 2 * MAX_TEXT + 2
 local MAX_RUN = 61 * 1024
@@ -82,8 +86,9 @@ local function bounded(text)
   return text:sub(1, cut) .. '…'
 end
 M.bounded = bounded
--- Store scans. A run record can be up to 64 KiB, so a page of SCAN_LIMIT records can be over the
--- hub's reply limit of about 1 MiB (reply_too_large). A scan then asks for the same page (same
+-- Store scans (only the one-time import scans hub.store: templates_sql.lua, S.import; the engine
+-- reads its runs from SQL in pages of SCAN_LIMIT). A run record can be up to 64 KiB, so a page of
+-- SCAN_LIMIT records can be over the hub's reply limit of about 1 MiB (reply_too_large). A scan then asks for the same page (same
 -- prefix and after) with half the limit, down to 1, and keeps that limit for the rest of the scan.
 -- A new scan starts at SCAN_LIMIT again. Any other error, or reply_too_large at limit 1, stops the
 -- scan. A record that the plugin wrote went through one control message of at most 64 KiB, and
@@ -128,14 +133,13 @@ local function owes_grant_check(run) return finished(run) and by_agent(run) and 
 -- opts.retirable can postpone a retirement (the plugin waits for a Start form's switch decision:
 -- switch_settled); the step is tried again RETRY_DELAY seconds later, so retirement is eventual.
 -- Newer runs get higher IDs and only older runs are retired, so the rank of a run only grows.
--- Retirement replaces run-key/<key> with a marker {id, expired_at, form_rev} and deletes run/<id>
--- and the switch record, in one batch with if_rev on each record. The start-form record stays: it
--- cannot change while run-key/<key> names the live run (Templates writes it only when it is
--- absent, or after the marker expired), so form_rev, its rev at the retirement read, still names
--- it after the commit. This holds for the writers of Templates only, not for another writer of the
--- store. Hub revisions never reset (hub/cmd/hub/store.go, nextRev). A marker expires MARKER_TTL
--- seconds after expired_at: then the key is free again (checked on each use), and a cleanup
--- deletes the marker and its start-form record if that record still has rev form_rev.
+-- Retirement replaces the run key with a marker {run_id, expired_at, form_rev} and deletes the run
+-- and its switch row, in one transaction that reads them again. The start form stays: Templates
+-- writes it only when it is absent or its marker expired, so form_rev, its rev at retirement,
+-- still names it later. A form rev is unique: meta 'rev' gives new revisions above every imported
+-- hub.store rev (templates_sql.lua, the import floors). A marker expires MARKER_TTL seconds after
+-- expired_at: then the key is free again (checked on each use), and a cleanup deletes the marker
+-- and its start form if that form still has rev form_rev.
 local KEEP, MARKER_TTL, RETRY_DELAY, CLEANUP_EVERY = 200, 30 * 86400, 60, 86400
 M.KEEP, M.MARKER_TTL, M.RETRY_DELAY, M.CLEANUP_EVERY = KEEP, MARKER_TTL, RETRY_DELAY, CLEANUP_EVERY
 local function eligible(run) return finished(run) and not owes_revoke(run) and (not by_agent(run) or run.grant_id ~= nil) end
@@ -145,29 +149,33 @@ local function older(a, b) return #a < #b or #a == #b and a < b end
 function M.expired(marker, now)
   return type(marker) == 'table' and type(marker.expired_at) == 'number' and now - marker.expired_at >= MARKER_TTL
 end
--- form_expired: a start-form record that counts as absent: its run-key marker has expired and
--- names this record (form_rev). A legacy marker without form_rev never frees a later record.
+-- form_expired: a start form (a start_forms row) that counts as absent: its run key's marker (a
+-- run_keys row) has expired and names this form (form_rev). A legacy marker without form_rev
+-- never frees a later form.
 function M.form_expired(form, marker, now)
-  return type(form) == 'table' and type(marker) == 'table' and M.expired(marker.value, now)
-    and marker.value.form_rev ~= nil and marker.value.form_rev == form.rev
+  return type(form) == 'table' and type(marker) == 'table' and M.expired(marker, now)
+    and marker.form_rev ~= nil and marker.form_rev == form.rev
 end
 -- switch_settled: a user start into a new session has a Start form that switches the app once
 -- (templates.lua, switch_app). Its run is retirable only when the switch decision is final (a
--- switch record that is not 'attempted'), or when the form record is at least bound seconds old
--- (the form was closed, or the decision was lost). A form record without a valid at is from
--- before the switch: it never switches. Other starts never switch.
+-- switches row that is not 'attempted'), or when the form is at least bound seconds old (the form
+-- was closed, or the decision was lost). A form without at is from before the switch: it never
+-- switches. Other starts never switch.
 local FINAL = {done = true, refused = true, unknown = true}
 function M.switch_settled(run, form, switch, now, bound)
   if by_agent(run) or not run.request.new_session_name then return true end
-  local s = switch and switch.value
-  if type(s) == 'table' and FINAL[s.state] then return true end
-  local f = form and form.value
-  if type(f) ~= 'table' or type(f.at) ~= 'number' then return true end
-  return now - f.at >= bound
+  if type(switch) == 'table' and FINAL[switch.state] then return true end
+  if type(form) ~= 'table' or type(form.at) ~= 'number' then return true end
+  return now - form.at >= bound
 end
 
 function M.new(opts)
   local hub = assert(opts.hub, 'hub is required')
+  -- data: the SQL rows (templates_sql.lua). transaction: app.db.transaction. No hub call other
+  -- than hub.sql runs inside a transaction: each step reads, calls the hub, then writes in a new
+  -- transaction that checks what the read gave (a run's ver, a key's state).
+  local data = assert(opts.data, 'data is required')
+  local transaction = assert(opts.transaction, 'transaction is required')
   local start_tab = assert(opts.start_tab, 'start_tab is required')
   local resolve_root = assert(opts.resolve_root, 'resolve_root is required')
   local resolve_dir = assert(opts.resolve_dir, 'resolve_dir is required')
@@ -175,7 +183,7 @@ function M.new(opts)
   -- The scan state is in a table: closures write it and pcall catches errors around them. After a
   -- caught error, a closure's write to a captured local can be lost (LazyRex docs/rex-protocol.md,
   -- "Rex Lua runtime"): no closure writes a captured local where a pcall can catch.
-  local scan = {active = false, after = nil, limit = SCAN_LIMIT}
+  local scan = {active = false, after = nil}
   local now, after = opts.now or os.time, opts.after or rex.after
   -- kept: the eligible run IDs (a set) and their count; ready after the first full scan.
   -- maint: maintenance steps {kind, id | key, expect, due}, the run IDs being retired, the cleanup
@@ -192,18 +200,17 @@ function M.new(opts)
   local function enqueue(id)
     if not queued[id] then queue[#queue + 1], queued[id] = id, true end
   end
-  local function read(key)
-    local result = hub('hub.store.get', {keys = {key}})
-    local record = result.records and result.records[key]
-    if not record or type(record.rev) ~= 'string' then fail('unavailable', 'Invalid store result') end
-    return record.value, record.rev
+  -- read returns run id and its ver, or nil.
+  local function read(id)
+    local r = data.get_run(id)
+    if r then return r.value, r.ver end
   end
-  local function batch(ops, op)
-    local result = hub('hub.store.batch', {ops = ops, op = op})
-    -- The caller answers from the saved operation (another call saved it first).
-    if result.op_exists then fail('op_exists', 'The operation is already saved') end
-    if result.conflict then fail('conflict', 'Template run changed; retry with the same key') end
-    if not result.revs then fail('unavailable', 'Invalid store batch result') end
+  -- put_op saves the caller's operation {key, fingerprint, result} in the caller's transaction. An
+  -- operation that another call saved first gives op_exists: the caller answers from it, after its
+  -- fingerprint check (templates.lua, prior_op).
+  local function put_op(op)
+    if data.get_op(op.key) then fail('op_exists', 'The operation is already saved') end
+    data.put_op(op.key, op.fingerprint, op.result)
   end
   -- schedule makes the pump run at time due (opts.wake), unless a timer for an earlier time waits.
   local function schedule(due)
@@ -244,10 +251,22 @@ function M.new(opts)
     if kept.ids[id] then kept.ids[id], kept.n = nil, kept.n - 1 end
     maint.retiring[id] = nil
   end
-  local function save(run, rev, op)
-    batch({{key = 'run/' .. run.id, if_rev = rev, value = run}}, op)
+  -- committed runs after a run change commits: the retention index and the views.
+  local function committed(run)
     keep(run)
     if opts.changed then pcall(opts.changed, copy(run)) end
+  end
+  -- update writes run over the ver of its read, in the caller's transaction. A run that another
+  -- step changed since that read (for example a dismiss during a tab start) gives conflict, and
+  -- nothing is written.
+  local function update(run, ver)
+    if not data.update_run(run, ver) then fail('conflict', 'Template run changed; retry with the same key') end
+  end
+  -- save is the write of advance: advance reads the run, calls the hub (a revoke, find_grant,
+  -- hub.session.ensure, a tab start), then writes over the ver of that read.
+  local function save(run, ver)
+    transaction(function() update(run, ver) end)
+    committed(run)
   end
   local function compile(node, root)
     if type(node) ~= 'table' then fail('invalid_input', 'layout must be an object') end
@@ -344,56 +363,88 @@ function M.new(opts)
     return json_size(final)
   end
 
+  -- check_form checks, in the admission transaction, that the start form of key is still the one
+  -- that the caller read: form.expect is that row (absent: false), compared by rev and
+  -- fingerprint. Then it writes form.write (a new form) if the caller has one.
+  local function check_form(key, form)
+    local cur = data.get_form(key)
+    local e = form.expect
+    if e then
+      if not cur or cur.rev ~= e.rev or cur.fingerprint ~= e.fingerprint then
+        fail('conflict', 'This start is being submitted twice; retry with the same key')
+      end
+    elseif cur then
+      fail('conflict', 'This start is being submitted twice; retry with the same key')
+    end
+    if form.write then data.put_form(key, form.write.fingerprint, form.write.request, form.write.at) end
+  end
+  -- same_key: the run key row now is the one that admission read (both absent, or the same row).
+  local function same_key(a, b)
+    if a == nil or b == nil then return a == b end
+    return a.run_id == b.run_id and a.expired_at == b.expired_at and a.form_rev == b.form_rev
+  end
   -- Repeated admission uses the original request before checking today's directories or template.
-  -- The frozen requests survive a changed profile, template, cwd, or plugin process.
-  function engine.admit(request)
+  -- The frozen requests survive a changed profile, template, cwd, or plugin process. form
+  -- (optional, templates.lua start_core): the start form {expect, write}; its check and its write
+  -- commit in the admission transaction.
+  function engine.admit(request, form)
     fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
     text(request.key, 'key')
-    local admission_key = 'run-key/' .. request.key
-    local existing, admission_rev = read(admission_key)
-    if type(existing) == 'table' and existing.expired_at ~= nil then
+    local key = request.key
+    local read_key = data.get_run_key(key)
+    local existing = read_key
+    if existing and existing.expired_at ~= nil then
       -- A retired run's marker: the key is used until the marker expires, then it is free (the
-      -- new run replaces the marker, with if_rev).
+      -- new run replaces the marker).
       if not M.expired(existing, now()) then
         fail('expired', 'This start finished and its record was removed. Use a new key.')
       end
       existing = nil
     end
     if existing then
-      local run = engine.get(existing.id)
+      local run = engine.get(existing.run_id)
       if not same(run.request, request) then fail('operation_conflict', 'This key has different content') end
+      if form and form.write then transaction(function() check_form(key, form) end) end
       if not finished(run) then enqueue(run.id) end
       return run
     end
+    -- prepare checks the directories (hub calls): before the transaction.
     local root, tabs = prepare(request)
-    local counter, counter_rev = read('run-counter')
-    -- Decimal addition keeps operation IDs exact beyond Lua's integer precision.
-    local digits, carry = tostring(counter or '0'), 1
-    local id = ''
-    for i = #digits, 1, -1 do
-      local n = tonumber(digits:sub(i, i)) + carry
-      id, carry = tostring(n % 10) .. id, math.floor(n / 10)
-    end
-    if carry == 1 then id = '1' .. id end
-    if #id > MAX_RUN_ID then fail('unavailable', 'The run counter is full') end
-    local run = build(request, root, tabs, id)
-    -- Refuse a run that cannot be written at its final size: it would stop at its first update
-    -- with a session made and no tab (observed in the lab, tests/limits.lua). The size is of the
-    -- compiled tabs that the batch writes, with the actual run ID.
-    local size = final_size(run)
-    if size > MAX_RUN then
-      fail('invalid_input', string.format('The template is too large to start: its start record needs about %d KiB, and the limit is %d KiB',
-        math.ceil(size / 1024), math.floor(MAX_RUN / 1024)))
-    end
-    batch({{key=admission_key, if_rev=admission_rev, value={id=id}},
-      {key='run-counter', if_rev=counter_rev, value=id}, {key='run/' .. id, if_rev='0', value=run}})
-    enqueue(id)
+    local run = transaction(function()
+      if not same_key(data.get_run_key(key), read_key) then
+        fail('conflict', 'This start is being submitted twice; retry with the same key')
+      end
+      if form then check_form(key, form) end
+      -- Decimal addition keeps operation IDs exact beyond Lua's integer precision.
+      local digits, carry = tostring(data.get_counter() or '0'), 1
+      local id = ''
+      for i = #digits, 1, -1 do
+        local n = tonumber(digits:sub(i, i)) + carry
+        id, carry = tostring(n % 10) .. id, math.floor(n / 10)
+      end
+      if carry == 1 then id = '1' .. id end
+      if #id > MAX_RUN_ID then fail('unavailable', 'The run counter is full') end
+      local r = build(request, root, tabs, id)
+      -- Refuse a run that cannot be written at its final size: it would stop at its first update
+      -- with a session made and no tab (observed in the lab, tests/limits.lua). The size is of the
+      -- compiled tabs that the transaction writes, with the actual run ID.
+      local size = final_size(r)
+      if size > MAX_RUN then
+        fail('invalid_input', string.format('The template is too large to start: its start record needs about %d KiB, and the limit is %d KiB',
+          math.ceil(size / 1024), math.floor(MAX_RUN / 1024)))
+      end
+      data.put_run_key(key, id)
+      data.set_counter(id)
+      data.insert_run(r)
+      return r
+    end)
+    enqueue(run.id)
     if opts.changed then pcall(opts.changed, copy(run)) end
     return copy(run)
   end
 
   -- measure returns the final-record size (final_size) of a new run of request with a run ID of
-  -- MAX_RUN_ID digits, after admit's validation and compile. It reads no store record and writes
+  -- MAX_RUN_ID digits, after admit's validation and compile. It reads no row and writes
   -- nothing. The save check uses it (templates.lua, save_core).
   function engine.measure(request)
     fields(request, {key=true, template=true, root=true, session_id=true, new_session_name=true, placement=true, by=true}, 'run request')
@@ -404,7 +455,7 @@ function M.new(opts)
 
   function engine.get(id)
     text(id, 'run id')
-    local run = read('run/' .. id)
+    local run = read(id)
     if not run then fail('not_found', 'Template run not found') end
     return copy(run)
   end
@@ -412,59 +463,81 @@ function M.new(opts)
   -- Dismiss stops only this run's remaining orchestration. A sent Rex request can still finish.
   -- Keep its requests and results for inspection; never stop, close, or recreate its resources.
   -- op (optional) is the caller's operation record {key, fingerprint, result}: it commits in the
-  -- same batch as the dismissed state, so a lost reply cannot split them.
+  -- same transaction as the dismissed state, so a lost reply cannot split them. The read and the
+  -- write are in that transaction with no hub call between: no ver check is needed.
   function engine.dismiss(id, op)
     text(id, 'run id')
-    local run, rev = read('run/' .. id)
-    if not run then fail('not_found', 'Template run not found') end
-    if run.status == 'dismissed' then
-      if op then batch({}, op) end
-      return copy(run)
+    local t = transaction(function()
+      local r, ver = read(id)
+      if not r then fail('not_found', 'Template run not found') end
+      if r.status == 'dismissed' then
+        if op then put_op(op) end
+        return {run = r, changed = false}
+      end
+      if r.status ~= 'pending' and r.status ~= 'unknown' and r.status ~= 'blocked' and r.status ~= 'authorizing' then
+        fail('conflict', 'Only a pending, unknown, blocked or unauthorized run can be dismissed')
+      end
+      r.dismissed_from, r.status = r.status, 'dismissed'
+      update(r, ver)
+      if op then put_op(op) end
+      return {run = r, changed = true}
+    end)
+    local run = t.run
+    if t.changed then
+      committed(run)
+      if owes_revoke(run) or owes_grant_check(run) then enqueue(id) end
     end
-    if run.status ~= 'pending' and run.status ~= 'unknown' and run.status ~= 'blocked' and run.status ~= 'authorizing' then
-      fail('conflict', 'Only a pending, unknown, blocked or unauthorized run can be dismissed')
-    end
-    run.dismissed_from, run.status = run.status, 'dismissed'
-    save(run, rev, op)
-    if owes_revoke(run) or owes_grant_check(run) then enqueue(id) end
     return copy(run)
   end
 
   -- authorize records the grant of an agent's run and lets it dispatch. A run that is no longer
-  -- waiting (finished, dismissed, or already authorized) keeps its state.
+  -- waiting (finished, dismissed, or already authorized) keeps its state. One transaction: read
+  -- and write with no hub call between.
   function engine.authorize(id, grant_id)
     text(id, 'run id')
     text(grant_id, 'grant id')
     if not short_id(grant_id) then fail('invalid_input', 'Invalid grant ID') end
-    local run, rev = read('run/' .. id)
-    if not run then fail('not_found', 'Template run not found') end
-    if run.grant_id ~= nil then
-      if run.grant_id ~= grant_id then fail('conflict', 'The run has another grant') end
-      return copy(run)
+    local t = transaction(function()
+      local r, ver = read(id)
+      if not r then fail('not_found', 'Template run not found') end
+      if r.grant_id ~= nil then
+        if r.grant_id ~= grant_id then fail('conflict', 'The run has another grant') end
+        return {run = r, changed = false}
+      end
+      r.grant_id = grant_id
+      if r.status == 'authorizing' then r.status, r.error = 'queued', nil end
+      update(r, ver)
+      return {run = r, changed = true}
+    end)
+    local run = t.run
+    if t.changed then
+      committed(run)
+      enqueue(id)
     end
-    run.grant_id = grant_id
-    if run.status == 'authorizing' then run.status, run.error = 'queued', nil end
-    save(run, rev)
-    enqueue(id)
     return copy(run)
   end
 
   -- retry queues a blocked, pending or unknown run again. The queued state and the operation
-  -- (op = {key, fingerprint, result}; result.woken is set here) commit in one batch, so a lost
-  -- reply cannot lose the retry: the run is queued durably, and any wake dispatches it.
+  -- (op = {key, fingerprint, result}; result.woken is set here) commit in one transaction, so a
+  -- lost reply cannot lose the retry: the run is queued durably, and any wake dispatches it.
   function engine.retry(id, op)
     text(id, 'run id')
-    local run, rev = read('run/' .. id)
-    if not run then fail('not_found', 'Template run not found') end
-    local woken = run.status == 'blocked' or run.status == 'pending' or run.status == 'unknown'
-    op.result = {run_id = id, woken = woken}
-    if not woken then
-      batch({}, op)
-      return op.result
+    local t = transaction(function()
+      local r, ver = read(id)
+      if not r then fail('not_found', 'Template run not found') end
+      local w = r.status == 'blocked' or r.status == 'pending' or r.status == 'unknown'
+      op.result = {run_id = id, woken = w}
+      if w then
+        r.status, r.error = 'queued', nil
+        update(r, ver)
+      end
+      put_op(op)
+      return {run = r, woken = w}
+    end)
+    if t.woken then
+      committed(t.run)
+      enqueue(id)
     end
-    run.status, run.error = 'queued', nil
-    save(run, rev, op)
-    enqueue(id)
     return op.result
   end
 
@@ -477,13 +550,13 @@ function M.new(opts)
   end
 
   local function advance(id)
-    local run, rev = read('run/' .. id)
+    local run, ver = read(id)
     if not run then return end
     if owes_revoke(run) then
       -- The final state is committed: give the grant back. A failure retries at the next wake.
       if opts.revoke and pcall(opts.revoke, run.grant_id) then
         run.grant_revoked = true
-        save(run, rev)
+        save(run, ver)
       end
       return
     end
@@ -494,7 +567,7 @@ function M.new(opts)
       checked[id] = true
       if short_id(grant_id) then
         run.grant_id = grant_id
-        save(run, rev)
+        save(run, ver)
         enqueue(id)
       end
       return
@@ -506,7 +579,7 @@ function M.new(opts)
       local grant_id = opts.find_grant and opts.find_grant(copy(run))
       if short_id(grant_id) then engine.authorize(id, grant_id) return end
       local msg = 'The start is not authorized yet; retry the start with the same key'
-      if run.error ~= msg then run.error = msg; save(run, rev) end
+      if run.error ~= msg then run.error = msg; save(run, ver) end
       return
     end
     if not run.session_id then
@@ -514,16 +587,16 @@ function M.new(opts)
       local ok, result = pcall(hub, 'hub.session.ensure', {key=run.session_key, name=run.request.new_session_name})
       if not ok then
         run.status, run.error = 'blocked', note(id, message(result))
-        save(run, rev)
+        save(run, ver)
         return
       end
       if not short_id(result.session_id) then
         run.status, run.error = 'blocked', 'Invalid session result; outcome unknown'
-        save(run, rev)
+        save(run, ver)
         return
       end
       run.session_id, run.status, run.error = result.session_id, 'queued', nil
-      save(run, rev)
+      save(run, ver)
       enqueue(id)
       return
     end
@@ -534,7 +607,7 @@ function M.new(opts)
       if run.request.placement then tab.request.placement = copy(run.request.placement) end
       if run.grant_id then tab.request.grant_id = run.grant_id end
       run.status = 'starting'
-      save(run, rev)
+      save(run, ver)
       enqueue(id)
       return
     end
@@ -576,76 +649,57 @@ function M.new(opts)
     else
       run.status, run.error = 'blocked', 'Unrecognized tab start status; outcome unknown'
     end
-    save(run, rev)
+    save(run, ver)
     if run.status == 'queued' or owes_revoke(run) then enqueue(id) end
   end
 
   -- Maintenance steps (one per tick, after the run work). A failed step waits RETRY_DELAY seconds
   -- (a timer wakes the pump); it never blocks the run queue.
-  local function form_key(key) return opts.form_key and opts.form_key(key) end
-  -- retire reads the run and its records fresh and retires it only if it is still eligible and
-  -- run-key/<key> names it (not a marker). Else it leaves the run (a lost reply: it is gone).
+  -- retire reads the run, its run key, start form and switch in one transaction (no hub call),
+  -- and retires the run only if it is still eligible and its key names it (not a marker). Else it
+  -- leaves the run (a lost commit reply: it is gone). It replaces the key with the marker
+  -- {run_id, expired_at, form_rev = the form's rev} and deletes the run and the switch row.
   local function retire(id)
-    local run = read('run/' .. id)
-    if type(run) ~= 'table' or not eligible(run) then drop(id) return end
-    local key = run.request.key
-    local rkey, fkey, skey = 'run-key/' .. key, form_key(key), opts.switch_key and opts.switch_key(key)
-    local keys = {'run/' .. id, rkey}
-    if fkey then keys[#keys + 1] = fkey end
-    if skey then keys[#keys + 1] = skey end
-    local got = hub('hub.store.get', {keys = keys}).records or {}
-    local r, k = got['run/' .. id], got[rkey]
-    if not r or type(r.value) ~= 'table' or not eligible(r.value) or r.value.request.key ~= key
-      or not k or type(k.value) ~= 'table' or k.value.id ~= id or k.value.expired_at ~= nil then
-      drop(id)
-      return
-    end
-    local f, s = fkey and got[fkey], skey and got[skey]
-    -- opts.retirable (the plugin: switch_settled) can postpone the step: it is tried again later.
-    if opts.retirable and not opts.retirable(copy(r.value), f and copy(f), s and copy(s), now()) then return 'later' end
-    local marker = {id = id, expired_at = now()}
-    if f and f.value ~= nil then marker.form_rev = f.rev end
-    local ops = {{key = 'run/' .. id, if_rev = r.rev, delete = true}, {key = rkey, if_rev = k.rev, value = marker}}
-    if s and s.value ~= nil then ops[#ops + 1] = {key = skey, if_rev = s.rev, delete = true} end
-    batch(ops)
+    local result = transaction(function()
+      local run = read(id)
+      if type(run) ~= 'table' or not eligible(run) then return 'drop' end
+      local key = run.request.key
+      local k = data.get_run_key(key)
+      if not k or k.run_id ~= id or k.expired_at ~= nil then return 'drop' end
+      local f, s = data.get_form(key), data.get_switch(key)
+      -- opts.retirable (the plugin: switch_settled) can postpone the step: it is tried again later.
+      if opts.retirable and not opts.retirable(copy(run), f and copy(f), s and copy(s), now()) then return 'later' end
+      data.delete_run(id)
+      data.mark_run_key(key, id, now(), f and f.rev or nil)
+      if s then data.delete_switch(key) end
+      return 'retired'
+    end)
+    if result == 'later' then return 'later' end
     drop(id)
-    if opts.changed then pcall(opts.changed) end
+    if result == 'retired' and opts.changed then pcall(opts.changed) end
   end
-  -- expire deletes a marker that still is the one the cleanup scan saw (same id, expired_at and
-  -- form_rev) and has expired, and its start-form record only if that has rev form_rev.
+  -- expire deletes a marker that still is the one the cleanup page saw (same run_id, expired_at
+  -- and form_rev) and has expired, and its start form only if that has rev form_rev. One
+  -- transaction.
   local function expire(key, expect)
-    local rkey, fkey = 'run-key/' .. key, form_key(key)
-    local keys = {rkey}
-    if fkey then keys[2] = fkey end
-    local got = hub('hub.store.get', {keys = keys}).records or {}
-    local k, f = got[rkey], fkey and got[fkey]
-    local v = k and k.value
-    if type(v) ~= 'table' or v.id ~= expect.id or v.expired_at ~= expect.expired_at or v.form_rev ~= expect.form_rev
-      or not M.expired(v, now()) then return end
-    local ops = {{key = rkey, if_rev = k.rev, delete = true}}
-    if v.form_rev ~= nil and f and f.value ~= nil and f.rev == v.form_rev then ops[2] = {key = fkey, if_rev = f.rev, delete = true} end
-    batch(ops)
+    transaction(function()
+      local k = data.get_run_key(key)
+      if not k or k.run_id ~= expect.run_id or k.expired_at ~= expect.expired_at or k.form_rev ~= expect.form_rev
+        or not M.expired(k, now()) then return end
+      data.delete_run_key(key)
+      local f = k.form_rev ~= nil and data.get_form(key)
+      if f and f.rev == k.form_rev then data.delete_form(key) end
+    end)
   end
-  -- cleanup_page scans one page of run-key/ and queues each expired marker.
+  -- cleanup_page reads one page of expired markers (in key order) and queues each one.
   local function cleanup_page()
     local c = maint.cleanup
-    local args = {prefix = 'run-key/', limit = c.limit}
-    if c.after then args.after = c.after end
-    local got, page = pcall(hub, 'hub.store.scan', args)
-    if not got then
-      local next_limit = M.smaller(c.limit, page)
-      if not next_limit then error(page, 0) end
-      c.limit = next_limit
-      return
+    local rows = data.expired_markers(c.after, now() - MARKER_TTL, SCAN_LIMIT)
+    for _, row in ipairs(rows) do
+      queue_step({kind = 'expire', key = row.key, expect = {run_id = row.run_id, expired_at = row.expired_at, form_rev = row.form_rev}, due = now()})
+      c.after = row.key
     end
-    if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run-key scan') end
-    for k, record in pairs(page.records) do
-      if M.expired(record.value, now()) then
-        queue_step({kind = 'expire', key = k:sub(#'run-key/' + 1), expect = copy(record.value), due = now()})
-      end
-    end
-    c.after = page.next
-    if not page.next then
+    if #rows < SCAN_LIMIT then
       maint.cleanup = nil
       maint.cleanup_due = now() + CLEANUP_EVERY
       schedule(maint.cleanup_due)
@@ -661,7 +715,7 @@ function M.new(opts)
   local function maintain()
     local t = now()
     if not maint.cleanup and maint.cleanup_due and maint.cleanup_due <= t then
-      maint.cleanup, maint.cleanup_due = {after = nil, limit = SCAN_LIMIT}, nil
+      maint.cleanup, maint.cleanup_due = {after = nil}, nil
     end
     local i = due_step(t)
     if i then
@@ -701,40 +755,32 @@ function M.new(opts)
   end
   engine.maintenance = function() return {kept = kept.n, ready = kept.ready, steps = #maint.items, cleanup = maint.cleanup ~= nil} end
 
-  -- Wake scans one store page per tick (one try: a reply_too_large retries the page with a smaller
-  -- limit at the next tick). Pending and unknown runs wait for a worker event, reconnect or
-  -- explicit retry. A store failure also waits: no immediate retry loop.
+  -- Wake reads one page of run summaries per tick (data.run_summaries, in run ID order). Pending
+  -- and unknown runs wait for a worker event, reconnect or explicit retry. A read failure also
+  -- waits: no immediate retry loop.
   function engine.wake()
-    if not scan.active then scan.active, scan.after, scan.limit = true, nil, SCAN_LIMIT end
+    if not scan.active then scan.active, scan.after = true, nil end
   end
   engine.resume = engine.wake
   function engine.tick()
     local ok, err = pcall(function()
       if scan.active then
-        local args = {prefix='run/', limit=scan.limit}
-        if scan.after then args.after = scan.after end
         scan.paged = true
-        local got, page = pcall(hub, 'hub.store.scan', args)
-        if not got then
-          local next_limit = M.smaller(scan.limit, page)
-          if not next_limit then error(page, 0) end
-          scan.limit = next_limit
-          return
-        end
-        if type(page.records) ~= 'table' then fail('unavailable', 'Invalid run scan') end
-        for _, record in pairs(page.records) do
-          local run = record.value
-          if run and (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
+        local page = data.run_summaries(scan.after, SCAN_LIMIT)
+        local more = #page == SCAN_LIMIT
+        for _, run in ipairs(page) do
+          scan.after = run.id
+          if (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
           if type(run) == 'table' and type(run.id) == 'string' and eligible(run) and not kept.ids[run.id] then
             kept.ids[run.id], kept.n = true, kept.n + 1
           end
         end
-        scan.after, scan.active = page.next, page.next ~= nil
-        if not page.next and not kept.ready then
+        scan.active = more
+        if not more and not kept.ready then
           -- The first full scan: the index is complete. The first cleanup starts now.
           kept.ready, maint.cleanup_due = true, now()
           trim()
-        elseif not page.next then
+        elseif not more then
           trim()
         end
         return

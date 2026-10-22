@@ -30,7 +30,7 @@ test('D an old stuck start stays listed with Dismiss behind 54 newer starts, and
     if i == 900 then run.request.by = 'alice' end
     ops[#ops + 1] = {key = 'run/' .. i, value = run}
   end
-  write(ops)
+  W.twrite(ops)
   local p = W.panel(s)
   local tree = p:render()
   local stuck = node(tree, 'stuck').items
@@ -42,5 +42,5 @@ test('D an old stuck start stays listed with Dismiss behind 54 newer starts, and
   expect(recent[1].id).to_be('954')
   for _, item in ipairs(recent) do expect(item.action).to_be(nil) end
   expect(p:action('stuck', 'dismiss', {item_id = 'dismiss:900'}, 'd-dismiss').status).to_be('succeeded')
-  expect(store('run/900').value.status).to_be('dismissed')
+  expect(W.rec('run/900').value.status).to_be('dismissed')
 end)

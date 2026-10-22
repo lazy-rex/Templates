@@ -1,0 +1,105 @@
+-- The start records in SQL (templates_sql.lua; docs/sdk-port.md, "Stage 2", slice 2). Admission
+-- writes the start form, the run key, the counter and the run in one transaction; dismiss writes
+-- the run and its operation in one transaction. A lost commit reply (the commit happened) replays;
+-- a refused commit leaves nothing.
+
+local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
+local function part(s) return #s .. ':' .. s end
+local function counter() local r = sql("SELECT v FROM meta WHERE k = 'run-counter'")[1]; return r and r.v end
+local function rows(sql_text, params) return #sql(sql_text, params) end
+local function saved(a, name)
+  local s, root = W.workspace()
+  W.capture(a, s)
+  a:call('templates.save', {name = name, root = root, session_id = s, key = 'save-' .. name})
+  return root
+end
+
+test('admission: a lost commit reply replays the same run; the counter moves once', function()
+  local alice = agent('alice')
+  local root = saved(alice, 'sr-lost')
+  local before = counter()
+  local key = 'start/agent/' .. part('alice') .. part('sr-lost')
+  local inj = inject({match = {sql_commit_writes = 'runs'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
+  local args = {template = 'sr-lost', root = root, key = 'sr-lost'}
+  expect_error(function() alice:call('templates.start', args) end, 'unavailable')
+  expect(injection(inj).consumed).to_be(1)
+  local id = W.rec('run-key/' .. key).value.id
+  expect(id).to_be(tostring((tonumber(before) or 0) + 1))
+  local r = alice:call('templates.start', args)
+  expect(r.run_id).to_be(id)
+  expect(counter()).to_be(id)
+  expect(rows("SELECT id FROM runs WHERE value ->> '$.request.key' = ?", {key})).to_be(1)
+  expect(rows('SELECT key FROM start_forms WHERE key = ?', {key})).to_be(1)
+  W.wait_run(alice, id, 'open')
+end)
+
+-- A commit that the hub refuses (here tx_expired, as after the 10 s transaction limit; the test
+-- refuses the commit, it does not wait for the limit): the start form, the run key, the counter
+-- and the run all stay absent, and a retry with the same key admits once.
+test('admission: a refused commit leaves no form, key, counter or run; a retry admits once', function()
+  local alice = agent('alice')
+  local root = saved(alice, 'sr-refused')
+  local before = counter()
+  local key = 'start/agent/' .. part('alice') .. part('sr-refused')
+  local inj = inject({match = {sql_commit_writes = 'runs'}, fail = 'transaction ended by the test', fail_code = 'tx_expired'})
+  local args = {template = 'sr-refused', root = root, key = 'sr-refused'}
+  expect_error(function() alice:call('templates.start', args) end, 'tx_expired')
+  expect(injection(inj).consumed).to_be(1)
+  expect(counter()).to_be(before)
+  expect(W.rec('run-key/' .. key).value).to_be(nil)
+  expect(rows('SELECT key FROM start_forms WHERE key = ?', {key})).to_be(0)
+  expect(rows("SELECT id FROM runs WHERE value ->> '$.request.key' = ?", {key})).to_be(0)
+  local r = alice:call('templates.start', args)
+  expect(r.run_id).to_be(tostring((tonumber(before) or 0) + 1))
+  W.wait_run(alice, r.run_id, 'open')
+end)
+
+-- An agent run that waits for its grant (authorizing): the engine only looks for the grant, so
+-- the test opens no session.
+test('dismiss: a lost commit reply replays its saved reply; one operation, one dismissed run', function()
+  local alice = agent('alice')
+  local id = '9001'
+  local key = 'start/agent/' .. part('alice') .. part('sr-dismiss')
+  W.twrite({{key = 'run/' .. id, value = {id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
+    session_key = 'templates/' .. id .. '/session', request = {key = key, by = 'alice', root = '/', new_session_name = 'sr',
+    template = {v = 1, name = 'sr', tabs = {}}}}}, {key = 'run-key/' .. key, value = {id = id}}})
+  local inj = inject({match = {sql_commit_writes = 'ops'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
+  local args = {run_id = id, key = 'sr-dismiss'}
+  expect_error(function() alice:call('templates.dismiss', args) end, 'unavailable')
+  expect(injection(inj).consumed).to_be(1)
+  expect(W.rec('run/' .. id).value.status).to_be('dismissed')
+  expect(alice:call('templates.dismiss', args)).to_equal({run_id = id, status = 'dismissed'})
+  expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part('alice') .. part('sr-dismiss')})).to_be(1)
+  expect(W.rec('run/' .. id).value.dismissed_from).to_be('authorizing')
+end)
+
+-- A run over FRAME_MAX as a parameter: the root holds 3 directories of 240 "<", and the run holds
+-- the root 12 times (the run, its request, and the cwd of each of 5 panes in the tab and in the
+-- tab request). "<" is 6 bytes in the value and 7 as a parameter, so the value fits MAX_RUN and the
+-- parameter is over the frame limit. Each save of advance writes the run in chunks over the ver
+-- of its read. (A long tab title cannot be used: Rex allows 60 characters.)
+test('a run over the frame limit as a parameter opens; each save is a chunked update with the ver check', function()
+  local alice = agent('alice')
+  local root = W.real(W.HOME) .. '/' .. string.rep('<', 240) .. '/' .. string.rep('<', 240) .. '/' .. string.rep('<', 240)
+  W.mkdir(root)
+  root = W.real(root)
+  local function leaf() return {launch = {shell = true}, dir = '.'} end
+  local layout = leaf()
+  for _ = 1, 4 do layout = {direction = 'horizontal', ratio = 0.5, before = leaf(), after = layout} end
+  W.twrite({{key = 'template/' .. W.hex('sr-chunk'), value = {v = 1, name = 'sr-chunk', saved_by = 'alice',
+    tabs = {{title = 'chunk', layout = layout}}}}})
+  local r = alice:call('templates.start', {template = 'sr-chunk', root = root, key = 'sr-chunk'})
+  W.wait_run(alice, r.run_id, 'open')
+  local run = W.rec('run/' .. r.run_id)
+  expect(#rex.json.encode(rex.json.encode(run.value)) > 60 * 1024).to_be(true)
+  expect(#rex.json.encode(run.value) <= 61 * 1024).to_be(true)
+  expect(tonumber(run.rev) > 2).to_be(true)
+  expect(run.value.tabs[1].request.layout ~= nil).to_be(true)
+end)
+
+-- status is a copy of value.status: every writer sets both (admission, each save, dismiss, the
+-- import, the test writer). This file's runs went through each engine write.
+test('every run row has status = value.status', function()
+  expect(sql("SELECT count(*) AS n FROM runs WHERE status IS NOT value ->> '$.status'")[1].n).to_be(0)
+  expect(rows('SELECT id FROM runs')).not_to_be(0)
+end)

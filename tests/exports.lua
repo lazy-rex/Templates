@@ -108,10 +108,10 @@ test('an agent start opens its tabs as the agent, with a grant; a retry gives th
     if w.session_id == run.session_id and w.parent == 'alice' then mine = mine + 1 end
   end
   expect(mine >= 2).to_be(true)
-  local g = store('run/' .. r.run_id).value
+  local g = W.rec('run/' .. r.run_id).value
   expect(type(g.grant_id)).to_be('string')
   -- The finished run gives its grant back.
-  wait('the revoke of the grant', function() return store('run/' .. r.run_id).value.grant_revoked == true end, 20)
+  wait('the revoke of the grant', function() return W.rec('run/' .. r.run_id).value.grant_revoked == true end, 20)
 end)
 
 test('the user starts through the form into a new session', function()
@@ -141,27 +141,27 @@ test('dismiss and retry: an agent acts on another agent\'s run; the run stays th
   -- A session that does not exist blocks the first tab.
   local a = alice:call('templates.start', {template = 'never', root = root, session_id = 'session:00000000-0000-0000-0000-000000000000', key = 'sk-1'})
   wait_run(alice, a.run_id, 'blocked')
-  local grant_id = store('run/' .. a.run_id).value.grant_id
+  local grant_id = W.rec('run/' .. a.run_id).value.grant_id
   expect(type(grant_id)).to_be('string')
   local retried = bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})
   expect(retried).to_equal({run_id = a.run_id, woken = true})
   expect(bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
   -- The run stays alice's, with her grant.
-  expect(store('run/' .. a.run_id).value.request.by).to_be('alice')
-  expect(store('run/' .. a.run_id).value.grant_id).to_be(grant_id)
+  expect(W.rec('run/' .. a.run_id).value.request.by).to_be('alice')
+  expect(W.rec('run/' .. a.run_id).value.grant_id).to_be(grant_id)
   -- The retry queued the run; it blocks again (the session does not exist).
   wait_run(alice, a.run_id, 'blocked')
   expect(bob:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
   expect(bob:call('templates.dismiss', {run_id = a.run_id, key = 'x1'})).to_equal({run_id = a.run_id, status = 'dismissed'})
   -- A replay of bob's retry after the dismiss answers the same and wakes nothing.
   expect(bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
-  expect(store('run/' .. a.run_id).value.status).to_be('dismissed')
+  expect(W.rec('run/' .. a.run_id).value.status).to_be('dismissed')
   -- The user's stuck run: an agent dismisses it.
-  write({{key = 'run/990', value = {id = '990', status = 'blocked', next_tab = 1, root = root, results = {}, session_key = 'templates/990/session',
+  W.twrite({{key = 'run/990', value = {id = '990', status = 'blocked', next_tab = 1, root = root, results = {}, session_key = 'templates/990/session',
     tabs = {{key = 'templates/990/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
     request = {key = 'k990', root = root, new_session_name = 'u990', template = {v = 1, name = 'u990', tabs = {}}}}}})
   expect(bob:call('templates.dismiss', {run_id = '990', key = 'x-user'})).to_equal({run_id = '990', status = 'dismissed'})
-  expect(store('run/990').value.request.by).to_be(nil)
+  expect(W.rec('run/990').value.request.by).to_be(nil)
   -- The user: Retry and Dismiss rows of another agent's stuck run in the panel.
   local b = alice:call('templates.start', {template = 'never', root = root, session_id = 'session:00000000-0000-0000-0000-000000000000', key = 'sk-2'})
   wait_run(alice, b.run_id, 'blocked')
@@ -200,24 +200,24 @@ test('a retry whose reply was lost: the replay recovers the queued run and retri
   seed_blocked()
   local a = agent('alice')
   local r = a:call('templates.start', blocked_args('retry-start'))
-  wait('blocked', function() return store('run/' .. r.run_id).value.status == 'blocked' end)
+  wait('blocked', function() return W.rec('run/' .. r.run_id).value.status == 'blocked' end)
   rex.sleep(1)
-  local run = store('run/' .. r.run_id).value
+  local run = W.rec('run/' .. r.run_id).value
   run.error = 'the retry has not run'
-  write({{key = 'run/' .. r.run_id, value = run}})
-  with_injection({match = {op_prefix = 'retry/agent/'}, replay = true, fail = 'lost retry reply'}, 1, function()
+  W.twrite({{key = 'run/' .. r.run_id, value = run}})
+  with_injection({match = {sql_commit_writes = 'ops'}, fail = 'lost retry reply', fail_code = 'unavailable', after = true}, 1, function()
     expect_error(function() a:call('templates.retry', {run_id = r.run_id, key = 'retry-lost'}) end, 'lost retry reply')
   end)
   expect(a:call('templates.retry', {run_id = r.run_id, key = 'retry-lost'}).woken).to_be(true)
   wait('the queued run ran', function()
-    local v = store('run/' .. r.run_id).value
+    local v = W.rec('run/' .. r.run_id).value
     return v.status == 'blocked' and v.error ~= 'the retry has not run'
   end, 20)
   -- The run is stuck again: a replay of the same retry does not dispatch it again.
-  local stuck = store('run/' .. r.run_id)
+  local stuck = W.rec('run/' .. r.run_id)
   expect(a:call('templates.retry', {run_id = r.run_id, key = 'retry-lost'}).woken).to_be(true)
   rex.sleep(1)
-  expect(store('run/' .. r.run_id).rev).to_be(stuck.rev)
+  expect(W.rec('run/' .. r.run_id).rev).to_be(stuck.rev)
 end)
 
 test('start refuses a key that two IDs of one agent used, after the identities merge', function()

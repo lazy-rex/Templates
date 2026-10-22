@@ -6,25 +6,7 @@
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local function part(s) return #s .. ':' .. s end
 local function tpl(name, title) return {v = 1, name = name, saved_by = 'user', tabs = {{title = title, layout = {launch = {shell = true}, dir = '.'}}}} end
--- reset clears the SQL state, so the next plugin start imports again. rev = true also clears the
--- revision counter (the import sets its floor again).
-local function reset(rev)
-  sql_write('DELETE FROM templates')
-  sql_write('DELETE FROM ops')
-  sql_write(rev and "DELETE FROM meta" or "DELETE FROM meta WHERE k <> 'rev'")
-end
--- restart replaces the plugin instance (hub.admin.replace), so the new instance imports. The hub's
--- faults and injections stay armed (a hub restart would end them).
-local function restart()
-  local st = H.hub('hub.test.status', {}).plugins.templates
-  H.hub('hub.admin.replace', {plugin = 'templates', expect_instance = st.instance_id})
-end
-local function imported()
-  wait('the import', function()
-    local ok, rows = pcall(sql, "SELECT v FROM meta WHERE k = 'import'")
-    return ok and rows[1] and rows[1].v == 'done' or nil
-  end, 60)
-end
+local reset, restart, imported = W.reset_import, W.restart, W.imported
 local function row(key) return sql('SELECT CAST(rev AS TEXT) AS rev, value FROM templates WHERE hex = ?', {key:sub(#'template/' + 1)})[1] end
 -- same checks that the row of key has the exact JSON text and the rev of the store record.
 local function same(key)
@@ -58,8 +40,9 @@ test('the import copies every template record exactly, the save and delete opera
   expect(alice:call('templates.get', {template = 'imp-mix'}).template.tabs[1].title == MIX_TITLE).to_be(true)
   local ops = {}
   for _, o in ipairs(sql('SELECT key, fingerprint, result FROM ops ORDER BY key')) do ops[#ops + 1] = {o.key, o.fingerprint, o.result} end
+  -- Slice 2 imports the dismiss and retry operations too (their own step, import/ops-run).
   expect(ops).to_equal({{'delete/agent/' .. part('alice') .. part('imp-d'), 'fp-delete', '{}'},
-    {'save/' .. part('imp-s'), 'fp-save', '{"close_form":true}'}})
+    {'dismiss/' .. part('imp-x'), 'fp-dismiss', '{}'}, {'save/' .. part('imp-s'), 'fp-save', '{"close_form":true}'}})
   -- The floor is above every store revision, and a new save gets a revision above it.
   local floor = tonumber(sql("SELECT v FROM meta WHERE k = 'rev'")[1].v)
   expect(floor > tonumber(store(AMP).rev) and floor > tonumber(store(MIX).rev)).to_be(true)
@@ -219,6 +202,98 @@ test('a call sent during the import is served after its end (a complete call rec
   expect(done_seq ~= nil and identify_seq ~= nil).to_be(true)
   expect(identify_seq > done_seq).to_be(true)
   for i = 1, 200 do write({{key = 'template/' .. W.hex(string.format('o-%03d', i)), delete = true}}) end
+end)
+
+-- Slice 2: the start records. A lab that completed a slice 1 import has 'import' = 'done' and the
+-- slice 1 done flags; each slice 2 step checks only its own flag, so it runs. The shapes: a run
+-- with a 32-digit ID, the 32-digit counter, a live run key, a marker with form_rev, a legacy
+-- marker (no form_rev), a start form with at and a legacy one without at, a switch, and the
+-- dismiss and retry operations (their own ops_scan step).
+local function meta_v(k) local r = sql('SELECT v FROM meta WHERE k = ?', {k})[1]; return r and r.v end
+local function slice2_done() wait('the slice 2 import', function() return meta_v('import/ops-run-done') end, 60) end
+local BIG = '12345678901234567890123456789012'
+local function hex(s) return W.hex(s) end
+local function run_value(id, key, status, extra)
+  local v = {id = id, status = status, next_tab = 1, root = '/', results = {}, tabs = {}, session_key = 'templates/' .. id .. '/session',
+    request = {key = key, root = '/', template = {v = 1, name = 'imp2', tabs = {}}, new_session_name = 'imp2'}}
+  for k, x in pairs(extra or {}) do v[k] = x end
+  return v
+end
+local K1, K2, K3, K4 = 'start/' .. part('i2-live'), 'start/' .. part('i2-mark'), 'start/' .. part('i2-legacy'), 'start/' .. part('i2-noat')
+
+test('slice 2 imports every start record shape exactly, after a completed slice 1 import', function()
+  agent('alice')
+  imported()
+  write({{key = 'start-form/' .. hex(K2), value = {fingerprint = 'fp-2', request = {key = K2}, at = 123}},
+    {key = 'start-form/' .. hex(K4), value = {fingerprint = 'fp-4', request = {key = K4}}}})
+  local form_rev = store('start-form/' .. hex(K2)).rev
+  write({{key = 'run/' .. BIG, value = run_value(BIG, K1, 'open')},
+    {key = 'run/77', value = run_value('77', 'start/' .. part('i2-agent'), 'blocked', {grant_id = 'grant:i2'})},
+    {key = 'run-counter', value = BIG},
+    {key = 'run-key/' .. K1, value = {id = BIG}},
+    {key = 'run-key/' .. K2, value = {id = '5', expired_at = 1000, form_rev = form_rev}},
+    {key = 'run-key/' .. K3, value = {id = '6', expired_at = 1001}},
+    {key = 'switch/' .. hex(K1), value = {state = 'refused', code = 'timeout', message = 'm'}}})
+  put_operation({key = 'dismiss/' .. part('i2-x'), fingerprint = 'fp-dismiss', result = {run_id = '5', status = 'dismissed'}})
+  put_operation({key = 'retry/' .. part('i2-y'), fingerprint = 'fp-retry', result = {run_id = '5', woken = true}})
+  reset(false)
+  -- A slice 1 install: its steps are done.
+  for _, k in ipairs({'import', 'import/template-done', 'import/ops-done'}) do
+    W.sql_write('INSERT INTO meta (k, v) VALUES (?, ?)', {k, k == 'import' and 'done' or '1'})
+  end
+  restart()
+  slice2_done()
+  -- Runs: exact value, exact 32-digit ID, status = value.status.
+  expect(W.rec('run/' .. BIG).value).to_equal(store('run/' .. BIG).value)
+  expect(W.rec('run/77').value).to_equal(store('run/77').value)
+  expect(sql("SELECT count(*) AS n FROM runs WHERE status IS NOT value ->> '$.status'")[1].n).to_be(0)
+  expect(meta_v('run-counter')).to_be(BIG)
+  -- Run keys: live, marker with form_rev, legacy marker (NULL form_rev).
+  expect(W.rec('run-key/' .. K1).value).to_equal({id = BIG})
+  expect(W.rec('run-key/' .. K2).value).to_equal({id = '5', expired_at = 1000, form_rev = form_rev})
+  expect(W.rec('run-key/' .. K3).value).to_equal({id = '6', expired_at = 1001})
+  -- Start forms: the store rev, and at NULL in a legacy form.
+  local f2, f4 = W.rec('start-form/' .. hex(K2)), W.rec('start-form/' .. hex(K4))
+  expect(f2.rev).to_be(form_rev)
+  expect(f2.value).to_equal({fingerprint = 'fp-2', request = {key = K2}, at = 123})
+  expect(f4.value).to_equal({fingerprint = 'fp-4', request = {key = K4}})
+  expect(W.rec('switch/' .. hex(K1)).value).to_equal({state = 'refused', code = 'timeout', message = 'm'})
+  -- The dismiss and retry operations, although the slice 1 operations step was done.
+  local ops = {}
+  for _, o in ipairs(sql("SELECT key FROM ops WHERE (key LIKE 'dismiss/%' OR key LIKE 'retry/%') AND key LIKE '%i2-%' ORDER BY key")) do ops[#ops + 1] = o.key end
+  expect(ops).to_equal({'dismiss/' .. part('i2-x'), 'retry/' .. part('i2-y')})
+  -- The second floor: meta 'rev' is above every store revision, so a new form never gets an
+  -- imported form's rev.
+  expect(#meta_v('rev') > #form_rev or (#meta_v('rev') == #form_rev and meta_v('rev') > form_rev)).to_be(true)
+  -- Clean up the store records (a later reset imports the store again) and the rows.
+  write({{key = 'start-form/' .. hex(K2), delete = true}, {key = 'start-form/' .. hex(K4), delete = true},
+    {key = 'run/' .. BIG, delete = true}, {key = 'run/77', delete = true}, {key = 'run-counter', delete = true},
+    {key = 'run-key/' .. K1, delete = true}, {key = 'run-key/' .. K2, delete = true}, {key = 'run-key/' .. K3, delete = true},
+    {key = 'switch/' .. hex(K1), delete = true}})
+  W.twrite({{key = 'run/' .. BIG, delete = true}, {key = 'run/77', delete = true}, {key = 'run-counter', delete = true}})
+end)
+
+-- A record of a shape that Templates did not write refuses the import: the start fails, the
+-- record and its cursor are not committed, and the hub starts the plugin again. When the record is
+-- gone, the next start completes the import.
+test('an unsupported start record refuses the import without moving its cursor; without it the import completes', function()
+  agent('alice')
+  imported()
+  write({{key = 'run/88', value = {id = '99', status = 'open'}}, {key = 'run/89', value = run_value('89', 'start/' .. part('i2-89'), 'open')}})
+  reset(false)
+  restart()
+  wait('the refusal', function() return meta_v('import/run-key') == nil and meta_v('import/floor-2') ~= nil and meta_v('import/template-done') and true or nil end, 30)
+  rex.sleep(2)
+  expect(meta_v('import')).to_be(nil)
+  expect(meta_v('import/run-done')).to_be(nil)
+  local cursor = meta_v('import/run')
+  expect(cursor == nil or cursor < 'run/88').to_be(true)
+  expect(#sql("SELECT id FROM runs WHERE id IN ('88', '89')")).to_be(0)
+  write({{key = 'run/88', delete = true}})
+  imported()
+  expect(W.rec('run/89').value.status).to_be('open')
+  write({{key = 'run/89', delete = true}})
+  W.twrite({{key = 'run/89', delete = true}})
 end)
 
 -- A call that times out during a long import: 6000 records take longer than the hub's 10 s for a
