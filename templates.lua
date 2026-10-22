@@ -825,7 +825,7 @@ local function start_core(caller, key, fingerprint, intent)
   return request, run, at
 end
 
-local function start_session(args)
+local function start_poll(args)
   local context = context_of(args)
   local values = form_values(args)
   local key = op_keys('start', USER, args.operation_key)[1]
@@ -853,6 +853,22 @@ local function start_session(args)
   end
   starting[view_id] = nil
   return done
+end
+
+-- TRANSIENT: the error codes after which the hub runs the operation again (hub viewsvc.go,
+-- definiteFailure). Any other error ends the operation, so its form must not keep "Starting…".
+local TRANSIENT = {disconnected = true, client_unavailable = true, timeout = true, deadline_exceeded = true,
+  unavailable = true, outcome_unknown = true}
+local function start_session(args)
+  local ok, result = pcall(start_poll, args)
+  if ok then return result end
+  local code = type(result) == 'table' and type(result.code) == 'string' and result.code:lower() or nil
+  local view_id = args.view_id
+  if not (code and TRANSIENT[code]) and type(view_id) == 'string' and starting[view_id] then
+    starting[view_id] = nil
+    pcall(invalidate)
+  end
+  error(result, 0)
 end
 
 -- templates.start {template, root, session_id? | new_session?, key} -> {run_id}. Neither session

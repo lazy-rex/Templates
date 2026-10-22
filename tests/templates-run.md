@@ -266,6 +266,22 @@ source session again: per pane `hub.spawn.spec`, `terminal.process` and `termina
   and 9 after. This count belongs to that fixture: a git root outside the captured directories
   adds work. The start latency results are in the commit review, not here.
 - No cache survives a render: the form never shows an older capture than its last render.
+## Start form wait
+
+A start from the Start form into a new session keeps its operation running (`{status = 'running'}`)
+until the switch is decided: the first tab opened, the start stopped, or the switch wait
+(`switch_wait`) passed. Meanwhile the form shows "Starting…" (`starting[view_id]`, memory only).
+The hub calls the action again about every 0.5 s while the result is `running`, whether the form
+is open or not (hub `viewsvc.go`, `runOps`).
+
+- A result clears the state. A success opens the panel in the form's place.
+- A definite error clears the state and asks for a render, because the hub ends the operation
+  (hub `viewsvc.go`, `definiteFailure`). A transient error (`disconnected`, `client_unavailable`,
+  `timeout`, `deadline_exceeded`, `unavailable`, `outcome_unknown`) keeps it: the hub runs the
+  operation again. Tests: `tests/starting.lua`.
+- After a plugin restart, the next call sets the state again; until then the form can render
+  without "Starting…" (untested).
+
 ## Size bounds
 
 One control message is at most 64 KiB (LazyRex `docs/rex-protocol.md`, "Rex Lua runtime"). The
