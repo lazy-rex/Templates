@@ -653,7 +653,6 @@ local function find_grant(run)
   if canon(g.entries) ~= canon(grant_entries(run)) then return nil end
   return g.grant_id
 end
-local invalidate
 -- Ticks run outside action handlers. An error stops the loop until the next wake (contract).
 -- loop.timer and loop.pump are table fields: pump and its callback write them, and pcall catches
 -- errors in the handlers that call pump (LazyRex docs/rex-protocol.md, "Rex Lua runtime"). The
@@ -668,7 +667,6 @@ local SWITCH_GRACE = 60
 local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = resolve_root, resolve_dir = resolve_dir,
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   log = function(line) print('templates: ' .. line) end,
-  changed = function() if invalidate then pcall(invalidate) end end,
   data = data, transaction = app.db.transaction, wake = function() if loop.pump then loop.pump() end end,
   retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end})
 -- start_size measures four references (engine.measure): a user and an agent start, each into a new
@@ -849,7 +847,7 @@ local function start_poll(args)
   if not request.new_session_name then return done end
   local view_id = text(args.view_id, 'view ID')
   if not switch_app(view_id, key, run_state.id, at) then
-    if not starting[view_id] then starting[view_id] = true; pcall(invalidate) end
+    if not starting[view_id] then starting[view_id] = true; app.refresh() end
     return {status = 'running', run_id = run_state.id}
   end
   starting[view_id] = nil
@@ -867,7 +865,7 @@ local function start_session(args)
   local view_id = args.view_id
   if not (code and TRANSIENT[code]) and type(view_id) == 'string' and starting[view_id] then
     starting[view_id] = nil
-    pcall(invalidate)
+    app.refresh()
   end
   error(result, 0)
 end
@@ -1596,7 +1594,6 @@ app.on('hub.changed', boundary(function(args) if args.what == 'workers' then wak
 app.command({id = 'start_session', title = 'Start Session…', description = 'Start a saved session template in a directory', keywords = {'template', 'workspace'}, route = '/forms/start', action = 'templates.start'})
 app.command({id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'})
 app.command({id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'})
-invalidate = function() hub('hub.ui.invalidate', {}) end
 -- After the registration: the starts that a restart interrupted continue from their durable records.
 app.start(function()
   engine.resume(); pump()

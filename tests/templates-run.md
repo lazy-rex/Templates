@@ -11,7 +11,7 @@ module does no work at load time. Construct it with:
 
 ```lua
 local engine = module.new({hub = hub, start_tab = start_tab,
-  resolve_root = resolve_root, resolve_dir = resolve_dir, changed = changed,
+  resolve_root = resolve_root, resolve_dir = resolve_dir,
   find_grant = find_grant, revoke = revoke, log = log})
 ```
 
@@ -21,7 +21,6 @@ local engine = module.new({hub = hub, start_tab = start_tab,
 - `start_tab(request)` starts or reads the same whole-tab operation. It must be
   idempotent by key and reject changed content for that key. It must return a
   current result for a closed tab, without recreating it.
-- `changed(run)` is optional. It receives a copy after a committed state change.
 - `find_grant(run)` is optional. It returns the grant ID of an agent's run, or nil. It never
   creates a grant ("Agent starts and grants").
 - `revoke(grant_id)` is optional. It revokes a grant. An error leaves the revoke owed.
@@ -256,7 +255,7 @@ replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
 ## Save form renders
 
 The hub renders every open view of the plugin again after each SQL commit that writes a table,
-each `hub.ui.invalidate` and each worker change (hub `docs/hub.md`, "Snapshots
+each `app.refresh()` and each worker change (hub `docs/hub.md`, "Snapshots
 and invalidation"; for SQL commits: the source of LazyRex f413b36, `sqlsvc.go` calls `kickViews`
 after a commit with table marks). A
 start makes many of these, so an open Save form renders many times. Each render captures the
@@ -465,29 +464,31 @@ There the SDK makes a render broad (each SQL commit renders it again) when the r
 reads files or runs a subprocess, makes a hub call other than an SQL query, or has a failed hub
 call. A Lua value that a render shows needs `app.refresh()` when it changes (LazyRex
 `docs/plugin-sdk.md` on hub main). This list gives the inputs of each view outside SQL (read in
-source):
+source) and the refresh that each view gets with read tracking:
 
 - Panel (`/panels/templates`): templates, runs, run counts and switches from SQL. Outside SQL:
-  `HOME` only (`short`), which does not change while the plugin runs.
+  `HOME` only (`short`), which does not change while the plugin runs. Tracked.
 - Template menu (`/forms/template/<hex>`) and Delete confirmation (`/forms/delete/<hex>/<rev>`):
-  the template row from SQL only.
+  the template row from SQL only. Tracked.
 - Start form (`/forms/start`, `start_view`):
   - Always: the Lua table `starting[view_id]` (the "Starting…" state). Each change of `starting`
-    calls `hub.ui.invalidate` (set in `start_poll`; cleared after a definite error in
+    calls `app.refresh()` (set in `start_poll`; cleared after a definite error in
     `start_session`), or closes the form (cleared before the `done` result).
   - The early paths return before any other input: a named template that is missing or has an
     unusable name, an empty template list, the fixed tree over the budget (`too_large_view`), a
     selected template option that does not fit, and no usable template option. They read SQL and
-    `starting` only.
+    `starting` only: tracked, with `app.refresh()` for `starting`.
   - The normal path also reads the source pane (`source_dir`: Rex `terminal.process` and
     `terminal.pwd` through `pane_dir`, the file system through `realpath` and `test -d`, and the
-    git root through a `git` subprocess) and calls `hub.session.list`.
+    git root through a `git` subprocess) and calls `hub.session.list`. The SDK makes it broad.
 - Save form (`/forms/save`, `save_tree`): reads no table.
   - `capture`: Rex `session.attach`, `session.view`, `session.list_blocks` and
     `terminal.process`; `hub.spawn.spec` for each kept pane; `pane_dir` (Rex `terminal.pwd`, the
     file system); `is_shell` (`SHELL`).
   - With panes, `save_fields`: `hub.profiles` (caught with `pcall`), `common_root` (git and the
     file system) and `short` (`HOME`); and `session_label` (`hub.session.list`).
+  - The SDK makes it broad (Rex and hub calls). Because it reads no table, a tracked render would
+    never render again.
 
 ## Verification
 

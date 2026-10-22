@@ -235,10 +235,10 @@ function M.new(opts)
     if kept.ids[id] then kept.ids[id], kept.n = nil, kept.n - 1 end
     maint.retiring[id] = nil
   end
-  -- committed runs after a run change commits: the retention index and the views.
+  -- committed runs after a run change commits: the retention index. (The views render again by
+  -- the hub's read tracking: the panel reads the runs table.)
   local function committed(run)
     keep(run)
-    if opts.changed then pcall(opts.changed, copy(run)) end
   end
   -- update writes run over the ver of its read, in the caller's transaction. A run that another
   -- step changed since that read (for example a dismiss during a tab start) gives conflict, and
@@ -424,7 +424,6 @@ function M.new(opts)
       return r
     end)
     enqueue(run.id)
-    if opts.changed then pcall(opts.changed, copy(run)) end
     return copy(run)
   end
 
@@ -661,7 +660,6 @@ function M.new(opts)
     end)
     if result == 'later' then return 'later' end
     drop(id)
-    if result == 'retired' and opts.changed then pcall(opts.changed) end
   end
   -- expire deletes a marker that still is the one the cleanup page saw (same run_id, expired_at
   -- and form_rev) and has expired, and its start form only if that has rev form_rev. One
