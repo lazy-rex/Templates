@@ -149,8 +149,8 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   the run, replaces the run key with the marker `{run_id, expired_at, form_rev}`, and deletes the
   switch row if it exists. The start form is not changed. `form_rev` is its rev at that read.
   Templates writes the start form only when it is absent, or after its marker expired, so it
-  cannot change while the run key names the live run. A form rev is unique: `meta` `rev` gives new
-  revisions above every imported hub.store revision (the import floors in `templates_sql.lua`).
+  cannot change while the run key names the live run. A form rev is unique: `meta` `rev` gives each new
+  revision once (`next_rev` in `templates_sql.lua`).
   `tests/engine.lua` retires a run with the largest operation key.
 - **Switch wait.** A user start into a new session has a Start form that switches the app once
   (`switch_app`). The form stays open until that decision. Its run is retired only when the switch

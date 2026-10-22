@@ -1,8 +1,5 @@
--- SQL storage of Templates (docs/sdk-port.md, "Stage 2"; LazyRex docs/sql.md). This file owns the
--- schema, the row writers and the one-time import from hub.store. Slice 1 moved the templates and
--- the operations of save and delete; slice 2 moves the start records (runs, run keys, the counter,
--- start forms, switches) and the operations of dismiss and retry. After the import, Templates
--- makes no hub.store call.
+-- SQL storage of Templates (LazyRex docs/sql.md). This file owns the schema and the row writers.
+-- Templates keeps every record in SQL and makes no hub.store call.
 --
 -- Request size. A value is a JSON text, and a hub.sql request carries it as a string parameter, so
 -- it is JSON-encoded twice: each "\uXXXX" escape (<, >, & and others) gets one more byte, and each
@@ -20,21 +17,20 @@ M.FRAME_MAX = FRAME_MAX
 
 local SCHEMA = {
   'CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)',
-  -- hex: the hex of the name (the old store key without "template/"). rev: the revision that a
-  -- held reference (agent replace, the Delete confirmation route) names.
+  -- hex: the hex of the name. rev: the revision that a held reference (agent replace, the Delete
+  -- confirmation route) names.
   'CREATE TABLE templates (hex TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL)',
   -- The saved replies of Templates operations (key: "<kind>/..."; Templates keeps its own replay:
   -- {store = false}, coordinator decision, 2026-10-22).
   'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)',
 }
--- Slice 2: the start records (docs/sdk-port.md, "Stage 2"). A run ID is decimal text of up to 32
--- digits (MAX_RUN_ID, over an SQLite INTEGER): runs sort by length(id), then id. status is a copy
--- of value.status: each writer sets both in one statement. ver counts the writes of a run: a write
--- after a hub call checks the ver that its read gave. A run_keys row with expired_at NULL names its
--- live run; else it is the marker of a retired run (form_rev NULL: a legacy marker). A start_forms
--- row is the frozen request of a start: rev is a revision of meta 'rev' (or the hub.store rev of an
--- imported record), and at is NULL in a legacy form. A switches row is the app switch decision of
--- a Start form ('attempted', then 'done', 'refused' or 'unknown').
+-- The start records. A run ID is decimal text of up to 32 digits (MAX_RUN_ID, over an SQLite
+-- INTEGER): runs sort by length(id), then id. status is a copy of value.status: each writer sets
+-- both in one statement. ver counts the writes of a run: a write after a hub call checks the ver
+-- that its read gave. A run_keys row with expired_at NULL names its live run; else it is the marker
+-- of a retired run (form_rev NULL: a legacy marker). A start_forms row is the frozen request of a
+-- start: rev is a revision of meta 'rev', and at is NULL in a legacy form. A switches row is the
+-- app switch decision of a Start form ('attempted', then 'done', 'refused' or 'unknown').
 local SCHEMA_2 = {
   'CREATE TABLE runs (id TEXT PRIMARY KEY, ver INTEGER NOT NULL, status TEXT NOT NULL, value TEXT NOT NULL)',
   'CREATE INDEX runs_order ON runs (length(id), id)',
@@ -109,12 +105,10 @@ function M.new(app)
     return changes
   end
 
-  -- next_rev returns a new revision, above every revision that hub.store gave before the import.
+  -- next_rev returns a new revision of meta 'rev'. The first call on a new database gives 1.
   function S.next_rev()
-    local r = db.exec("UPDATE meta SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) WHERE k = 'rev' RETURNING v")
-    local row = r.rows and r.rows[1]
-    if not row then fail('unavailable', 'The Templates revision counter is missing: the import did not run') end
-    return tostring(row.v)
+    local r = db.exec("INSERT INTO meta (k, v) VALUES ('rev', '1') ON CONFLICT (k) DO UPDATE SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT) RETURNING v")
+    return tostring(r.rows[1].v)
   end
   -- put_template writes the template row hx with rev and value (a Lua value; it is always encoded,
   -- also a string).
@@ -160,8 +154,8 @@ function M.new(app)
   function S.delete_run(id) db.exec('DELETE FROM runs WHERE id = ?', id) end
   -- run_summaries returns up to limit runs after run ID after (nil: from the first), in ID order,
   -- as {id, status, request = {by}, grant_id, grant_revoked}: the fields of the engine's rules
-  -- (finished, owes_revoke, owes_grant_check, eligible). The -> operator keeps each JSON type. An
-  -- imported run has no bound on these fields, so the page is read with db.each.
+  -- (finished, owes_revoke, owes_grant_check, eligible). The -> operator keeps each JSON type. The
+  -- page is read with db.each.
   function S.run_summaries(after, limit)
     local rows = {}
     db.each("SELECT id, status, value -> '$.request.by' AS by, value -> '$.grant_id' AS grant_id,"
@@ -238,9 +232,9 @@ function M.new(app)
     if row then return {rev = row.rev, fingerprint = row.fingerprint, request = rex.json.decode(row.request), at = row.at} end
   end
   -- put_form writes the form of key with a new revision (it replaces a form that the caller found
-  -- free) and returns the revision. rev is given only by the import (the hub.store rev).
-  function S.put_form(key, fingerprint, request, at, rev)
-    rev = rev or S.next_rev()
+  -- free) and returns the revision.
+  function S.put_form(key, fingerprint, request, at)
+    local rev = S.next_rev()
     write_text("INSERT INTO start_forms (key, rev, fingerprint, request, at) VALUES (?, ?, ?, '', ?) ON CONFLICT (key) DO UPDATE"
       .. " SET rev = excluded.rev, fingerprint = excluded.fingerprint, request = '', at = excluded.at", {key, rev},
       'UPDATE start_forms SET fingerprint = fingerprint || ? WHERE key = ?', {key}, fingerprint, {type(at) == 'number' and app.int(at) or NULL})
@@ -265,150 +259,6 @@ function M.new(app)
       v.state, v.code, v.message, start_key).changes > 0
   end
   function S.delete_switch(start_key) db.exec('DELETE FROM switches WHERE start_key = ?', start_key) end
-
-  -- Import (at start, after the registration and before the plugin serves: the SDK runs the start
-  -- code in its registration callback, and Rex Lua runs one handler at a time). The hub's store
-  -- fence orders it after the old instance: after hub.admin.replace returns, no store write of the
-  -- old instance commits. Each step has its own cursor and done flag in meta, so a step that a
-  -- slice 1 import completed does not run again. Each record commits in its own short transaction
-  -- with its cursor, so a crash or a lost commit reply continues at the next record. A record of a
-  -- shape that Templates did not write refuses the import (its key and the reason; the record and
-  -- its cursor are not committed): the start fails, and the hub starts it again. The store records
-  -- stay as they were before the import; they are not a rollback of later SQL writes.
-  local function refuse(key, reason)
-    local shown = #key > 200 and key:sub(1, 200) .. '…' or key
-    fail('internal', 'The import refused the store record ' .. shown .. ': ' .. reason)
-  end
-  local function unhex(s)
-    if #s % 2 ~= 0 or s:find('[^0-9a-f]') then return nil end
-    return (s:gsub('..', function(h) return string.char(tonumber(h, 16)) end))
-  end
-  -- lower: decimal text a is lower than b (by length, then as text).
-  local function lower(a, b) return #a < #b or #a == #b and a < b end
-  -- floor writes the store record key and returns its revision (above every revision the store gave).
-  local function floor(key)
-    local r = app.hub('hub.store.batch', {ops = {{key = key, value = {at = os.time()}}}})
-    local rev = r.revs and r.revs[key]
-    if type(rev) ~= 'string' or not rev:match('^%d+$') then fail('internal', 'The store gave no revision for the import marker') end
-    return rev
-  end
-  -- scan_step copies every record under prefix with fn(key, record) (in its transaction), from the
-  -- cursor meta(step), until meta(step .. '-done').
-  local function scan_step(opts, prefix, step, fn)
-    local after, limit = meta(step), opts.scan_limit
-    while meta(step .. '-done') == nil do
-      local args = {prefix = prefix, limit = limit}
-      if after then args.after = after end
-      local ok, page = pcall(app.hub, 'hub.store.scan', args)
-      if not ok then
-        limit = opts.smaller(limit, page)
-        if not limit then error(page, 0) end
-      else
-        local keys = {}
-        for k in pairs(page.records or {}) do keys[#keys + 1] = k end
-        table.sort(keys)
-        for _, k in ipairs(keys) do
-          local record = page.records[k]
-          db.transaction(function()
-            fn(k, record)
-            set_meta(step, k)
-          end)
-          after = k
-        end
-        if not page.next then db.transaction(function() set_meta(step .. '-done', '1') end) end
-      end
-    end
-  end
-  -- ops_step copies the operations of kinds (a set) from hub.store.ops_scan.
-  local function ops_step(step, kinds)
-    local cursor = meta(step)
-    while meta(step .. '-done') == nil do
-      local args = {limit = 100}
-      if cursor then args.after = cursor end
-      local page = app.hub('hub.store.ops_scan', args)
-      for _, op in ipairs(page.ops or {}) do
-        db.transaction(function()
-          if kinds[op.key:match('^(%a+)/')] then S.put_op(op.key, op.fingerprint, op.result) end
-          set_meta(step, op.key)
-        end)
-        cursor = op.key
-      end
-      if not page.next then db.transaction(function() set_meta(step .. '-done', '1') end) end
-    end
-  end
-  local function is_int(v) return type(v) == 'number' and v % 1 == 0 end
-  function S.import(opts)
-    -- Slice 1. The revision floor: a held revision of an old record never names a new row.
-    if not meta('rev') then
-      local rev = floor('sql-import')
-      db.transaction(function() if not meta('rev') then set_meta('rev', rev) end end)
-    end
-    -- Templates: every record under template/, also one that Templates did not write.
-    scan_step(opts, 'template/', 'import/template', function(k, record)
-      S.put_template(k:sub(#'template/' + 1), record.rev, record.value)
-    end)
-    ops_step('import/ops', {save = true, delete = true})
-    -- Slice 2. A second floor: the slice 1 engine wrote start forms to the store after the first
-    -- floor, so meta 'rev' moves above every store revision (a new form's rev never equals an
-    -- imported one).
-    if meta('import/floor-2') == nil then
-      local rev = floor('sql-import-2')
-      db.transaction(function()
-        if meta('import/floor-2') == nil then
-          if lower(meta('rev'), rev) then set_meta('rev', rev) end
-          set_meta('import/floor-2', rev)
-        end
-      end)
-    end
-    if meta('import/counter-done') == nil then
-      local got = app.hub('hub.store.get', {keys = {'run-counter'}}).records['run-counter']
-      local v = got and got.value
-      db.transaction(function()
-        if v ~= nil then
-          if type(v) ~= 'string' or not v:match('^%d+$') or #v > 32 then refuse('run-counter', 'the run counter is not decimal text of 1 to 32 digits') end
-          S.set_counter(v)
-        end
-        set_meta('import/counter-done', '1')
-      end)
-    end
-    scan_step(opts, 'run/', 'import/run', function(k, record)
-      local run, id = record.value, k:sub(#'run/' + 1)
-      if type(run) ~= 'table' or run.id ~= id or not id:match('^%d+$') or #id > 32 then refuse(k, 'not a run of its ID') end
-      if type(run.status) ~= 'string' or type(run.request) ~= 'table' or type(run.request.key) ~= 'string' or type(run.tabs) ~= 'table' then
-        refuse(k, 'a run needs status, request.key and tabs')
-      end
-      S.insert_run(run)
-    end)
-    scan_step(opts, 'run-key/', 'import/run-key', function(k, record)
-      local v = record.value
-      if type(v) ~= 'table' or type(v.id) ~= 'string' or (v.expired_at ~= nil and not is_int(v.expired_at))
-        or (v.form_rev ~= nil and type(v.form_rev) ~= 'string') or (v.form_rev ~= nil and v.expired_at == nil) then
-        refuse(k, 'not a run key {id} or a marker {id, expired_at, form_rev?}')
-      end
-      local key = k:sub(#'run-key/' + 1)
-      S.put_run_key(key, v.id)
-      if v.expired_at ~= nil then S.mark_run_key(key, v.id, v.expired_at, v.form_rev) end
-    end)
-    scan_step(opts, 'start-form/', 'import/start-form', function(k, record)
-      local v, key = record.value, unhex(k:sub(#'start-form/' + 1))
-      if not key or key == '' then refuse(k, 'the key is not the hex of an operation key') end
-      if type(v) ~= 'table' or type(v.fingerprint) ~= 'string' or type(v.request) ~= 'table' or (v.at ~= nil and not is_int(v.at)) then
-        refuse(k, 'not a start form {fingerprint, request, at?}')
-      end
-      S.put_form(key, v.fingerprint, v.request, v.at, record.rev)
-    end)
-    scan_step(opts, 'switch/', 'import/switch', function(k, record)
-      local v, key = record.value, unhex(k:sub(#'switch/' + 1))
-      if not key or key == '' then refuse(k, 'the key is not the hex of an operation key') end
-      if type(v) ~= 'table' or type(v.state) ~= 'string' or (v.code ~= nil and type(v.code) ~= 'string')
-        or (v.message ~= nil and type(v.message) ~= 'string') then
-        refuse(k, 'not a switch {state, code?, message?}')
-      end
-      S.insert_switch(key, v)
-    end)
-    ops_step('import/ops-run', {dismiss = true, retry = true})
-    if meta('import') ~= 'done' then db.transaction(function() set_meta('import', 'done') end) end
-  end
   return S
 end
 return M

@@ -86,22 +86,9 @@ local function bounded(text)
   return text:sub(1, cut) .. '…'
 end
 M.bounded = bounded
--- Store scans (only the one-time import scans hub.store: templates_sql.lua, S.import; the engine
--- reads its runs from SQL in pages of SCAN_LIMIT). A run record can be up to 64 KiB, so a page of
--- SCAN_LIMIT records can be over the hub's reply limit of about 1 MiB (reply_too_large). A scan then asks for the same page (same
--- prefix and after) with half the limit, down to 1, and keeps that limit for the rest of the scan.
--- A new scan starts at SCAN_LIMIT again. Any other error, or reply_too_large at limit 1, stops the
--- scan. A record that the plugin wrote went through one control message of at most 64 KiB, and
--- rex do encodes it as the hub's reply does ("<", ">" and "&" as \u003c, 6 bytes, both). So a page
--- of 15 such records fits, and the limits 50, 25, 12 reach a page that fits (observed on Rex
--- 0.0.1792158932-g88fd41; a server with a smaller message limit gives the hub a smaller one). A
--- record from another writer has no such bound.
+-- SCAN_LIMIT: the rows in one page of the engine's run reads and of the marker cleanup.
 local SCAN_LIMIT = 50
 M.SCAN_LIMIT = SCAN_LIMIT
--- smaller returns the limit for the next try of a page that failed with err, or nil to stop.
-function M.smaller(limit, err)
-  if type(err) == 'table' and err.code == 'reply_too_large' and limit > 1 then return math.floor(limit / 2) end
-end
 local function message(err)
   return type(err) == 'table' and (err.message or err.code or 'Request failed') or tostring(err)
 end
@@ -136,8 +123,8 @@ local function owes_grant_check(run) return finished(run) and by_agent(run) and 
 -- Retirement replaces the run key with a marker {run_id, expired_at, form_rev} and deletes the run
 -- and its switch row, in one transaction that reads them again. The start form stays: Templates
 -- writes it only when it is absent or its marker expired, so form_rev, its rev at retirement,
--- still names it later. A form rev is unique: meta 'rev' gives new revisions above every imported
--- hub.store rev (templates_sql.lua, the import floors). A marker expires MARKER_TTL seconds after
+-- still names it later. A form rev is unique: meta 'rev' gives each new revision once
+-- (templates_sql.lua, next_rev). A marker expires MARKER_TTL seconds after
 -- expired_at: then the key is free again (checked on each use), and a cleanup deletes the marker
 -- and its start form if that form still has rev form_rev.
 local KEEP, MARKER_TTL, RETRY_DELAY, CLEANUP_EVERY = 200, 30 * 86400, 60, 86400

@@ -224,9 +224,8 @@ local function capture(session_id)
 end
 
 -- Storage: the SQL row templates(hex, rev, value) with value {v = 1, name, tabs, saved_by} as JSON
--- (templates_sql.lua). hex is the hex of the name (the old store key was "template/" .. hex), so any
--- name is a valid key. A template's identity is its hex: value.name can differ in a row that
--- Templates did not write (an imported record). The panel and the forms name a template by its hex.
+-- (templates_sql.lua). hex is the hex of the name, so any name is a valid key.
+-- A template's identity is its hex, not value.name. The panel and the forms name a template by its hex.
 -- json_safe: the text comes back unchanged from a JSON round trip (rex.json.encode replaces an
 -- invalid UTF-8 byte with U+FFFD), so a form option or field can carry it.
 local function json_safe(s) return rex.json.decode(rex.json.encode(s)) == s end
@@ -1605,9 +1604,7 @@ app.command({id = 'start_session', title = 'Start Session…', description = 'St
 app.command({id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'})
 app.command({id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'})
 invalidate = function() hub('hub.ui.invalidate', {}) end
--- After the registration: the one-time import into SQL (templates_sql.lua), then the starts that a
--- restart interrupted continue from their durable records.
+-- After the registration: the starts that a restart interrupted continue from their durable records.
 app.start(function()
-  data.import({scan_limit = run_module.SCAN_LIMIT, smaller = run_module.smaller})
   engine.resume(); pump()
 end, {after_register = true, tx = false})

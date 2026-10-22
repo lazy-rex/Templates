@@ -1,10 +1,16 @@
--- Store scans of run and template records: a page of records must fit in one hub reply (about
--- 1 MiB), and a record can be up to 64 KiB. A scan asks for a page again with half the limit
--- after reply_too_large (templates_run.lua, "Store scans"). The records here are padded with "<":
--- rex do and the hub both encode it as \u003c (6 bytes), so 10 000 "<" are about 60 KB written
--- and in a reply. Tests in this file share one hub: each one uses its own record IDs and names.
+-- Large data: more than 1 MiB of runs or templates in SQL. The panel, templates.runs,
+-- templates.list, the Start form and the engine's run pages (SCAN_LIMIT rows) read every row
+-- once. The rows are padded with "<": rex do and the hub both encode it as \u003c (6 bytes), so
+-- 10 000 "<" are about 60 KB in a request or a reply. Tests in this file share one hub: each one
+-- uses its own record IDs and names.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
+
+-- The encoding that the padding depends on: rex do writes "<" as \u003c (6 bytes), as the hub's
+-- reply does (observed on Rex 0.0.1792158932-g88fd41).
+test('rex do encodes "<" as 6 bytes', function()
+  expect(rex.json.encode('<')).to_be('"\\u003c"')
+end)
 
 -- big_runs writes finished runs with the IDs from first to last, each with pad "<" (6 * pad
 -- bytes). One write per record: a runner request is at most 64 KiB.
@@ -35,8 +41,8 @@ local function run_ids(a)
   return ids
 end
 
--- 18 runs of 60 KB in a reply: a page of 50 (1.08 MB) and of 25 are too large; pages of 12 pass.
-test('the panel renders with more than 1 MiB of runs in the store', function()
+-- 18 runs of 60 KB: more than 1 MiB.
+test('the panel renders with more than 1 MiB of runs in SQL', function()
   local s = W.workspace()
   big_runs(1001, 1018, 10000)
   local tree = W.panel(s):render()
@@ -49,13 +55,13 @@ test('templates.runs lists every run once over more than 1 MiB of runs, on more 
   once(run_ids(agent('alice')), 1101, 1118)
 end)
 
--- 17 runs at the write bound (about 63 KB each): pages of 50 and 25 are too large, 12 fit.
+-- 17 runs at the write bound (about 63 KB each).
 test('runs at the 64 KiB write bound are all read', function()
   big_runs(1201, 1217, 10500)
   once(run_ids(agent('alice')), 1201, 1217)
 end)
 
--- Templates are scanned the same way: the panel, the Start form and templates.list.
+-- Templates: the panel, the Start form and templates.list read every row once.
 test('every template is listed once over more than 1 MiB of templates', function()
   local alice = agent('alice')
   local s = W.workspace()
@@ -76,8 +82,8 @@ test('every template is listed once over more than 1 MiB of templates', function
   once(names, 1, 18)
 end)
 
--- The engine scan after a restart: a queued user run sorts after 18 runs of about 60 KB each.
--- The run is read from the store, not with templates.runs (that is another scan).
+-- The engine's run pages after a restart: a queued user run sorts after 18 runs of about 60 KB
+-- each. The test reads the run row directly, not with templates.runs (another read).
 test('a queued run behind more than 1 MiB of runs resumes after a hub restart', function()
   local root = W.real(W.HOME)
   big_runs(2001, 2018, 10000)

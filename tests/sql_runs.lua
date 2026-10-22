@@ -141,7 +141,7 @@ test('a failed append in a chunked run update commits nothing; the run keeps its
 end)
 
 -- status is a copy of value.status: every writer sets both (admission, each save, dismiss, the
--- import, the test writer). This file's runs went through each engine write.
+-- test writer). This file's runs went through each engine write.
 test('every run row has status = value.status', function()
   expect(sql("SELECT count(*) AS n FROM runs WHERE status IS NOT value ->> '$.status'")[1].n).to_be(0)
   expect(rows('SELECT id FROM runs')).not_to_be(0)

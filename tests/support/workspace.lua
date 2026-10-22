@@ -164,11 +164,13 @@ end
 local function unstage() W.sql_write("DELETE FROM meta WHERE k = 'test-stage'") end
 local NULL = {null = true}
 local function null(v) if v == nil then return NULL end return v end
--- new_rev takes a revision from the plugin's counter (meta 'rev'), as a plugin write does.
+-- new_rev takes a revision from the plugin's counter (meta 'rev'), as a plugin write does (the
+-- first revision on a new database is 1).
 local function new_rev()
-  local rev = tonumber(sql("SELECT v FROM meta WHERE k = 'rev'")[1].v) + 1
-  W.sql_write("UPDATE meta SET v = ? WHERE k = 'rev'", {tostring(rev)})
-  return tostring(rev)
+  local row = sql("SELECT v FROM meta WHERE k = 'rev'")[1]
+  local rev = tostring((row and tonumber(row.v) or 0) + 1)
+  W.sql_write("INSERT INTO meta (k, v) VALUES ('rev', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", {rev})
+  return rev
 end
 
 -- The operation key of a UI start with key, and of an agent's start.
@@ -279,7 +281,7 @@ function W.put_template(hx, value)
   return rev
 end
 function W.delete_template(hx) W.sql_write('DELETE FROM templates WHERE hex = ?', {hx}) end
--- put_op saves an operation reply in SQL, as an older version saved it (and the import copied it).
+-- put_op saves an operation reply in SQL, as the plugin saves it.
 function W.put_op(op)
   W.sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {op.key, op.fingerprint, rex.json.encode(op.result)})
 end
@@ -299,23 +301,10 @@ function W.ui_delete(s, name, key)
   confirm:render()
   return confirm:action('confirm', 'submit', {values = {}}, key), confirm
 end
--- The import (templates_sql.lua). W.reset_import clears the SQL state, so the next plugin start
--- imports again. rev = true also clears the revision counter (the import sets its floor again).
-function W.reset_import(rev)
-  for _, t in ipairs({'templates', 'ops', 'runs', 'run_keys', 'start_forms', 'switches'}) do W.sql_write('DELETE FROM ' .. t) end
-  W.sql_write(rev and 'DELETE FROM meta' or "DELETE FROM meta WHERE k <> 'rev'")
-end
--- W.restart replaces the plugin instance (hub.admin.replace), so the new instance imports. The
--- hub's faults and injections stay armed (a hub restart would end them).
+-- W.restart replaces the plugin instance (hub.admin.replace): the new instance starts from the
+-- SQL state. The hub's faults and injections stay armed (a hub restart would end them).
 function W.restart()
   local st = H.hub('hub.test.status', {}).plugins.templates
   H.hub('hub.admin.replace', {plugin = 'templates', expect_instance = st.instance_id})
-end
--- W.imported waits until the import of the plugin start is done.
-function W.imported()
-  wait('the import', function()
-    local ok, rows = pcall(sql, "SELECT v FROM meta WHERE k = 'import'")
-    return ok and rows[1] and rows[1].v == 'done' or nil
-  end, 60)
 end
 return W

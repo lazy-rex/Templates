@@ -1,7 +1,6 @@
--- The Plugin SDK port (docs/sdk-port.md, "Stage 1" and "Stage 2"). The SDK registers the plugin
--- and dispatches the hub calls. Stage 2 keeps every Templates record in SQL (templates_sql.lua):
--- after the import, no hub.store call. An agent can call an export directly: the SDK identifies it
--- from the requester PID that Rex gives.
+-- The Plugin SDK. The SDK registers the plugin and dispatches the hub calls. Templates keeps every
+-- record in SQL (templates_sql.lua): no hub.store call. An agent can call an export directly: the
+-- SDK identifies it from the requester PID that Rex gives.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
