@@ -243,6 +243,86 @@ effect or a held revision needs it, and each guard that stays is listed here wit
 - Tested: LazyRex hub/sql-lab f413b36 with SDK eb9654d at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
   All 25 files pass (Templates a52ab11).
 
+### Slice 4: options for the table decision (proposed; for the coordinator)
+
+Release 4 keeps the private tables `ops` and `start_forms` and the raw views (coordinator
+decision, 2026-10-22). Slice 4 decides whether they stay. This section compares the options. The
+facts come from Templates 59b40b5 and the SDK at 040ee9b (`docs/plugin-sdk.md`, `docs/sql.md`
+sections 8 and 10). Nothing here is tested unless it says so.
+
+What each table does today:
+
+- `ops`: the saved replies of save, delete (agent and Delete confirmation), dismiss and retry,
+  under the caller's key (`<kind>/<part(key)>`, or `<kind>/agent/<part(id)><part(key)>` for each
+  ID of an agent). Templates checks every ID of an agent, and refuses with `conflict` when two
+  IDs saved the same key. The fingerprints are semantic (`save-v2/` + the values, `delete-ui-v1/`
+  + hex + rev). A reply replays without a time limit. Dismiss and retry write their reply in the
+  same transaction as the run.
+- `start_forms`: the frozen request of a start (fingerprint, request, `at`), under the start's
+  key. It is not a reply store. A start answers `{status = 'running'}` while it waits, and the
+  hub calls again. Each call reads the frozen request, so a call after a hub restart, or after
+  the run was retired, gives the same run. A marker's `form_rev` names the form, and the switch
+  wait uses `at` (Retention). Starts do not use `ops`: their replay is `run_keys` (30 days).
+
+Option A: keep both tables and the raw views (the release 4 state).
+
+- Deletes nothing. Changes nothing for users or agents.
+- Costs: about 40 lines of replay code (`op_keys`, `prior_op`, `saved_op`, the `put_op` calls)
+  and the `ops` rows, which have no size limit or eviction. Render dependencies: the raw views
+  render again after every SQL commit (hub 9db858f, `main.go:456`) until the hub tracks tables
+  for them too.
+
+Option B: SDK saved replies (`store = true`) in place of `ops`; `start_forms` stays.
+
+- Deletes the replay code above, the `ops` table and its import step (after the rows are moved
+  or left to expire).
+- Changes the guarantee: a retry replays within 7 days and within the last 10 000 keys
+  (`sql.md` section 8). After that, the handler runs again. For save, a late retry saves again
+  (without `replace`, it gets the name conflict; with it, the rev guard). For delete, it deletes
+  again or gets `not_found`. For dismiss and retry, the run state decides. Decision 1 (the replay
+  window) chose no time limit; option B reopens it, and needs a new fact or a new user decision.
+- Questions to check before this option:
+  1. Legacy agent IDs: the SDK finds a reply under one of `ctx.aliases` and saves under the
+     current ID. Templates refuses two IDs with the same key (`conflict`); the SDK takes the first
+     that it finds. Is that difference acceptable?
+  2. Semantic fingerprints: the SDK takes `opts.fingerprint = function(args)`. Templates' save
+     fingerprint uses the captured session (state, not only the arguments). Can a fingerprint
+     function read state, in the handler's transaction?
+  3. The rows: a retry of a key that Templates saved in `ops` before the change. Either the
+     import copies `ops` into `lazyrex_ops` (an SDK or hub change), or old keys run again once.
+  4. Dismiss and retry commit the run and their reply in one transaction. Today the handlers run
+     with `tx = false` and open their own transactions. With `store = true` and `tx = false`, does
+     the SDK save the reply in that same commit? If not, a lost reply between the two commits
+     runs the handler again: dismiss gives the same result, and retry can wake the run twice.
+
+Option C: `app.form` and `app.panel` in place of the raw views.
+
+- Gains: the SDK checks the field values, renders the standard form (Cancel, status), and the
+  render dependencies come from the tables that a render reads (`sql.md` section 10; not on hub
+  9db858f, which renders every view after each commit). The Save form latency issue (README) is
+  the main user-visible gain, and it needs only the hub side of section 10.
+- Costs and blockers:
+  - The routes carry values in the path (`/forms/start/<hex>`, `/forms/template/<hex>`,
+    `/forms/delete/<hex>/<rev>`). `app.form` matches a route with a query
+    (`app.route('/forms/delete', {hex, rev})`), so every route changes. A route change is
+    visible to the user: a saved view operation of an old route does not match the new one.
+  - The Start form switches the app once (`hub.app.select_session` with `view_id`), shows
+    "Starting…" while the run waits, and reads `start_forms` on each call. That needs `instead`,
+    `{status = 'running'}` and `ctx.view_id`, which the advanced surface has. It is the largest
+    view, and it carries the most tests (switch.lua, starting.lua, retention.lua).
+  - The Save form captures the source session at each render (hub and Rex calls). The SDK
+    refuses only writes in a render; whether `fields` may make these calls is untested.
+  - The panel has paged lists with a byte budget (views.lua, views_huge.lua). `app.ui.list`
+    must keep the same budget rules.
+- `start_forms` stays in option C: a `running` reply is never saved, so the frozen request needs
+  a table of its own either way.
+
+Recommendation (proposed): keep `start_forms` in every option. Do option C first, view by view,
+starting with the Delete confirmation and the template menu (small, few tests), then Save, then
+Start. Its gain (render dependencies) arrives when the hub tracks reads (hub 4.1 or 4.2, as the
+coordinator said), and it needs no change to the replay guarantee. Decide option B separately,
+after questions 1 to 4 have answers, because it reopens decision 1.
+
 ## 6. SDK gaps (sent 2026-10-22)
 
 The coordinator reports that the SDK v0 surface covers forms and routes (`app.view`), structured
