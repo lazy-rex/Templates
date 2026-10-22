@@ -88,9 +88,10 @@ function M.new(app)
     if not row then fail('unavailable', 'The Templates revision counter is missing: the import did not run') end
     return tostring(row.v)
   end
-  -- put_template writes the template row hx with rev and value (a Lua value or a JSON text).
+  -- put_template writes the template row hx with rev and value (a Lua value; it is always encoded,
+  -- also a string).
   function S.put_template(hx, rev, value)
-    local text = type(value) == 'string' and value or rex.json.encode(value)
+    local text = rex.json.encode(value)
     write_text('INSERT INTO templates (hex, rev, value) VALUES (?, ?, ?) ON CONFLICT (hex) DO UPDATE SET rev = excluded.rev, value = excluded.value',
       {hx, app.int(rev)}, 'UPDATE templates SET value = value || ? WHERE hex = ?', {hx}, text)
   end
@@ -100,9 +101,9 @@ function M.new(app)
     local row = db.first('SELECT CAST(rev AS TEXT) AS rev, value FROM templates WHERE hex = ?', hx)
     if row then return {rev = row.rev, value = rex.json.decode(row.value)} end
   end
-  -- put_op saves an operation reply (result: a Lua value or a JSON text).
+  -- put_op saves an operation reply (result: a Lua value; it is always encoded, also a string).
   function S.put_op(key, fingerprint, result)
-    local text = type(result) == 'string' and result or rex.json.encode(result)
+    local text = rex.json.encode(result)
     write_text('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET fingerprint = excluded.fingerprint, result = excluded.result',
       {key, fingerprint}, 'UPDATE ops SET result = result || ? WHERE key = ?', {key}, text)
   end

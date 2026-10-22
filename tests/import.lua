@@ -69,6 +69,29 @@ test('the import copies every template record exactly, the save and delete opera
   expect(tonumber(W.trow('template/' .. W.hex('imp-new')).rev) > floor).to_be(true)
 end)
 
+-- The reviewer's probe (773cd80 review): a value that is a string is a JSON string in its row, also
+-- a string that looks like JSON. Before the fix, the import wrote such a string as the row's text.
+test('a string value and a string operation result import as JSON strings', function()
+  local plain, looks = 'template/' .. W.hex('imp-str'), 'template/' .. W.hex('imp-str-json')
+  write({{key = plain, value = 'ordinary text'}, {key = looks, value = '{"v":1,"tabs":[]}'}})
+  put_operation({key = 'save/' .. part('imp-str-op'), fingerprint = 'fp-str', result = 'done'})
+  put_operation({key = 'delete/' .. part('imp-str-op'), fingerprint = 'fp-str', result = '{"close_form":true}'})
+  reset(false)
+  restart()
+  imported()
+  same(plain)
+  same(looks)
+  expect(row(looks).value).to_be(rex.json.encode('{"v":1,"tabs":[]}'))
+  expect(sql('SELECT result FROM ops WHERE key = ?', {'save/' .. part('imp-str-op')})[1].result).to_be('"done"')
+  expect(sql('SELECT result FROM ops WHERE key = ?', {'delete/' .. part('imp-str-op')})[1].result).to_be(rex.json.encode('{"close_form":true}'))
+  -- The list and the panel pass over a value that is not a template.
+  local names = {}
+  for _, t in ipairs(agent('alice'):call('templates.list', {}).templates) do names[t.name] = true end
+  expect(names['imp-str'] or names['imp-str-json'] or false).to_be(false)
+  write({{key = plain, delete = true}, {key = looks, delete = true}})
+  W.twrite({{key = plain, delete = true}, {key = looks, delete = true}})
+end)
+
 test('a failed append between two chunks commits nothing; the next start imports the record whole', function()
   write({{key = 'template/' .. W.hex('!imp-first'), value = tpl('!imp-first', string.rep('&', 10000))}})
   -- The empty name sorts first (hex ''): it is put back after this test.
