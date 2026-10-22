@@ -24,7 +24,7 @@ end)
 local HUGE = 'h' .. string.rep('<', 4200)
 test('no template option fits: the Start form has no submit and says to use templates.start', function()
   local s = W.workspace()
-  write({{key = 'template/' .. W.hex(HUGE), value = {v = 1, name = HUGE, saved_by = 'user',
+  W.twrite({{key = 'template/' .. W.hex(HUGE), value = {v = 1, name = HUGE, saved_by = 'user',
     tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}}}})
   local tree = W.open('start_session', '/forms/start', s):render()
   expect(size(tree) <= BUDGET).to_be(true)

@@ -79,7 +79,7 @@ test('a template that cannot start at its save root is refused at save (agent pa
   expect(ok).to_be(false)
   expect(err.code).to_be('invalid_input')
   expect(err.message).to_match('too large to start')
-  expect(store('template/' .. W.hex('size-big')).value).to_be(nil)
+  expect(W.trow('template/' .. W.hex('size-big')).value).to_be(nil)
   -- No save operation was saved: the same key saves another session.
   local small = server_pane(alice, 'small')
   expect(alice:call('templates.save', {name = 'size-big', root = small.dir, session_id = small.session, key = 'size-big'}).name).to_be('size-big')
@@ -96,7 +96,7 @@ test('a template that cannot start at its save root is refused at save (form pat
   expect(op.status).to_be('failed')
   expect(op.error.code).to_be('invalid_input')
   expect(tostring(op.error.message)).to_match('too large to start')
-  expect(store('template/' .. W.hex('size-big-form')).value).to_be(nil)
+  expect(W.trow('template/' .. W.hex('size-big-form')).value).to_be(nil)
 end)
 
 -- The guarantee at its boundary: a template just under the save limit starts at its save root on

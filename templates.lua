@@ -40,6 +40,9 @@ local function json_size(v) return #rex.json.encode(v) end
 -- The engine is a sibling file. Observed on Rex 1203: debug.getinfo gives the script's absolute path.
 local here = debug.getinfo(1, 'S').source:gsub('^@', '')
 local run_module = dofile(assert(here:match('^(/.*)/[^/]*$'), 'the plugin path must be absolute') .. '/templates_run.lua')
+-- The SQL storage (templates_sql.lua): the templates and the save and delete operations.
+local sql = dofile(here:match('^(/.*)/[^/]*$') .. '/templates_sql.lua')
+local data = sql.new(app)
 
 -- Directories. Both return canonical absolute paths (symlinks resolved) of existing directories.
 -- dir_memo: during one Save form render (with_dir_memo), real_dir and git_root check each path
@@ -221,16 +224,15 @@ end
 
 -- scan_all returns the values (tables) of every record under prefix. A page that is too large for
 -- a hub reply is asked for again with a smaller limit (templates_run.lua, "Store scans").
--- keyed = true gives {key, value} entries instead of the values.
-local function scan_all(prefix, keyed)
+local function scan_all(prefix)
   local list, after, limit = {}, nil, run_module.SCAN_LIMIT
   repeat
     local args = {prefix = prefix, limit = limit}
     if after then args.after = after end
     local ok, page = pcall(hub, 'hub.store.scan', args)
     if ok then
-      for key, record in pairs(page.records or {}) do
-        if type(record.value) == 'table' then list[#list + 1] = keyed and {key = key, value = record.value} or record.value end
+      for _, record in pairs(page.records or {}) do
+        if type(record.value) == 'table' then list[#list + 1] = record.value end
       end
       after = page.next
     else
@@ -241,23 +243,28 @@ local function scan_all(prefix, keyed)
   return list
 end
 
--- Storage: template/<hex name> = {v = 1, name, tabs}. hex keeps any name a valid key.
--- A template's identity is its storage key: value.name can differ in a record that Templates did
--- not write. The panel and the forms name a template by the hex of its key.
-local function template_key(name) return 'template/' .. hex(name) end
+-- Storage: the SQL row templates(hex, rev, value) with value {v = 1, name, tabs, saved_by} as JSON
+-- (templates_sql.lua). hex is the hex of the name (the old store key was "template/" .. hex), so any
+-- name is a valid key. A template's identity is its hex: value.name can differ in a row that
+-- Templates did not write (an imported record). The panel and the forms name a template by its hex.
 -- json_safe: the text comes back unchanged from a JSON round trip (rex.json.encode replaces an
 -- invalid UTF-8 byte with U+FFFD), so a form option or field can carry it.
 local function json_safe(s) return rex.json.decode(rex.json.encode(s)) == s end
 -- templates returns {hex, name, value} for each template record in key order. name is the name of
 -- the key when it is JSON-safe, else nil.
 local function templates()
-  local list = {}
-  for _, e in ipairs(scan_all('template/', true)) do
-    local hx = e.key:sub(#'template/' + 1)
-    local name = unhex(hx)
-    list[#list + 1] = {hex = hx, name = name and json_safe(name) and name or nil, value = e.value}
-  end
-  table.sort(list, function(a, b) return a.hex < b.hex end)
+  local list, after = {}, nil
+  repeat
+    local rows, more = app.db.query('SELECT hex, value FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex', after, after)
+    for _, row in ipairs(rows) do
+      local value = rex.json.decode(row.value)
+      if type(value) == 'table' then
+        local name = unhex(row.hex)
+        list[#list + 1] = {hex = row.hex, name = name and json_safe(name) and name or nil, value = value}
+      end
+      after = row.hex
+    end
+  until not more
   return list
 end
 -- display returns a text for a view: control characters become spaces, and a text over 200 bytes
@@ -296,13 +303,12 @@ local function delete_route(route)
 end
 -- read_template returns the record template/<hx> ({rev, value}) or nil when it has no table value.
 local function read_template(hx)
-  local key = 'template/' .. hx
-  local r = hub('hub.store.get', {keys = {key}}).records[key]
+  local r = data.get_template(hx)
   if r and type(r.value) == 'table' then return r end
 end
 local function load_template(name)
-  local key = template_key(text(name, 'template'))
-  local r = hub('hub.store.get', {keys = {key}}).records[key]
+  local key = hex(text(name, 'template'))
+  local r = data.get_template(key)
   if not r or type(r.value) ~= 'table' then fail('not_found', 'The template "' .. name .. '" no longer exists') end
   return r.value, r.rev, key
 end
@@ -423,11 +429,19 @@ local function op_keys(kind, caller, key)
   return list
 end
 -- prior_op returns the saved result of the first key that has one (the caller's current ID
--- first), or nil. Two IDs of one agent that both saved the key are a conflict.
+-- first), or nil. Two IDs of one agent that both saved the key are a conflict. A save or a delete
+-- reads its operation from SQL (sql.SQL_KINDS); the other kinds from hub.store.
+local function saved_op(k)
+  if sql.kind_in_sql(k) then
+    local op = data.get_op(k)
+    return op and {found = true, fingerprint = op.fingerprint, result = op.result} or {found = false}
+  end
+  return hub('hub.store.op', {key = k})
+end
 local function prior_op(keys, fingerprint)
   local found, result = 0, nil
   for _, k in ipairs(keys) do
-    local saved = hub('hub.store.op', {key = k})
+    local saved = saved_op(k)
     if saved.found then
       found = found + 1
       if saved.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
@@ -549,32 +563,28 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill, re
   end
   -- saved_by: who saved it (information only; anyone may delete it).
   local template = {v = 1, name = name, tabs = tabs, saved_by = caller.id}
-  local tkey = template_key(name)
-  -- The revision that the batch replaces: the agent's, with no read; else the record at the submit
-  -- ('0' when absent: a new save). The read comes after the capture and the size check, just
-  -- before the batch. A conflicting batch is not retried.
-  local if_rev = replace and replace.rev
-  if not if_rev then
-    local existing = hub('hub.store.get', {keys = {tkey}}).records[tkey]
-    local present = existing and existing.value ~= nil
-    if present and not latest then
+  local result = caller.id == 'user' and {close_form = true} or {name = name}
+  -- One short transaction reads the template and writes it with the operation, after the
+  -- capture and the size check. A replay that committed meanwhile answers. Revision guard: an
+  -- agent's replace names the revision that it read (templates.get), so only that revision is
+  -- replaced. The form's Replace it replaces the template as it is at the commit.
+  local outcome = app.db.transaction(function()
+    local again = prior_op(keys, fingerprint)
+    if again then return {result = again} end
+    local existing = data.get_template(hex(name))
+    if replace and replace.rev then
+      if not existing or existing.rev ~= replace.rev then
+        fail('conflict', 'The template ' .. named(name) .. ' changed or was deleted after you read it. Read it again with templates.get.')
+      end
+    elseif existing and not latest then
       fail('conflict', 'A template named ' .. named(name) .. ' exists. Choose another name, or ' ..
         (caller.id == 'user' and 'choose Replace it.' or 'replace it: templates.get gives its rev.'))
     end
-    if_rev = present and existing.rev or '0'
-  end
-  local result = caller.id == 'user' and {close_form = true} or {name = name}
-  local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = if_rev, value = template}},
-    op = {key = keys[1], fingerprint = fingerprint, result = result}})
-  if stored.op_exists then return prior_op(keys, fingerprint) end
-  if stored.conflict then
-    if replace and replace.rev then
-      fail('conflict', 'The template ' .. named(name) .. ' changed or was deleted after you read it. Read it again with templates.get.')
-    end
-    if latest then fail('conflict', 'The template ' .. named(name) .. ' changed or was deleted meanwhile. Submit again to replace it.') end
-    fail('conflict', 'A template with this name was saved meanwhile. Choose another name.')
-  end
-  return result
+    data.put_template(hex(name), data.next_rev(), template)
+    data.put_op(keys[1], fingerprint, result)
+    return {result = result}
+  end)
+  return outcome.result
 end
 
 local function save_template(args)
@@ -1246,26 +1256,35 @@ local function delete_core(caller, keys, name)
   local fingerprint = 'delete-v1/' .. part(tostring(name))
   local prior = prior_op(keys, fingerprint)
   if prior then return prior end
-  local tpl, rev, tkey = load_template(name)
-  local stored = hub('hub.store.batch', {ops = {{key = tkey, if_rev = rev, delete = true}}, op = {key = keys[1], fingerprint = fingerprint, result = {}}})
-  if stored.op_exists then return prior_op(keys, fingerprint) end
-  if stored.conflict then fail('conflict', 'The template changed; try again') end
-  return {}
+  -- One short transaction: the replay, the read and the deletion with its operation. An agent
+  -- deletes the template by name as it is at the commit, so no revision guard is needed.
+  return app.db.transaction(function()
+    local again = prior_op(keys, fingerprint)
+    if again then return again end
+    local _, _, hx = load_template(name)
+    data.delete_template(hx)
+    data.put_op(keys[1], fingerprint, {})
+    return {}
+  end)
 end
 -- The panel's delete (/forms/delete/<hex>/<rev>): the key and the revision come from the route that
--- the user confirmed, never from submitted values. The batch deletes only that revision (if_rev),
--- with no read before it, so a template replaced after the choice is kept. The replay answers
--- first.
+-- the user confirmed, never from submitted values. The replay answers first.
 local function delete_ui(keys, hx, rev)
   local fingerprint = 'delete-ui-v1/' .. part(hx) .. part(rev)
   local prior = prior_op(keys, fingerprint)
   if prior then return prior end
   local result = {close_form = true}
-  local stored = hub('hub.store.batch', {ops = {{key = 'template/' .. hx, if_rev = rev, delete = true}},
-    op = {key = keys[1], fingerprint = fingerprint, result = result}})
-  if stored.op_exists then return prior_op(keys, fingerprint) end
-  if stored.conflict then fail('conflict', 'The template changed after you chose Delete. Open it again.') end
-  return result
+  -- Revision guard: the user confirmed the revision in the route, so only that revision is
+  -- deleted; a template replaced after the choice is kept.
+  return app.db.transaction(function()
+    local again = prior_op(keys, fingerprint)
+    if again then return again end
+    local existing = data.get_template(hx)
+    if not existing or existing.rev ~= rev then fail('conflict', 'The template changed after you chose Delete. Open it again.') end
+    data.delete_template(hx)
+    data.put_op(keys[1], fingerprint, result)
+    return result
+  end)
 end
 
 -- Dismiss and retry act on one run, from the user or any agent. An agent's run still dispatches
@@ -1440,50 +1459,43 @@ local function list_page(after, limit)
     fail('invalid_input', 'after is a template name of at most ' .. MAX_AFTER_JSON .. ' bytes as JSON')
   end
   local page, size, last = {}, json_size({templates = {}}), nil
-  local scan_after, scan_limit = after and template_key(after) or nil, run_module.SCAN_LIMIT
+  -- The rows in hex order (the order of the old store keys). SQL reads only the summary of each
+  -- template: a row's JSON stays in the database. A reply that holds fewer rows than the query
+  -- gives more = true; the next query starts after the last row.
+  local from = after and hex(after) or nil
   while true do
-    local args = {prefix = 'template/', limit = scan_limit}
-    if scan_after then args.after = scan_after end
-    local ok, res = pcall(hub, 'hub.store.scan', args)
-    if not ok then
-      scan_limit = run_module.smaller(scan_limit, res)
-      if not scan_limit then error(res, 0) end
-    else
-      local keys = {}
-      for k in pairs(res.records or {}) do keys[#keys + 1] = k end
-      table.sort(keys)
-      for _, k in ipairs(keys) do
-        local name = unhex(k:sub(#'template/' + 1))
-        if not cursorable(name) then
-          if last ~= nil then return list_result(page, last) end
-          fail('too_large', 'The record ' .. named(k) .. ' is not a Templates record: its key is'
-            .. ' not hex, or its name is not valid UTF-8 or is over ' .. MAX_AFTER_JSON .. ' bytes as JSON. No cursor skips it.')
-        end
-        local value = res.records[k].value
-        local row, cost = nil, 0
-        if type(value) == 'table' and type(value.tabs) == 'table' then
-          if #page == limit then return list_result(page, last) end
-          row = {name = name, tabs = #value.tabs, saved_by = value.saved_by}
-          cost = json_size(row) + (#page > 0 and 1 or 0)
-        end
-        if size + cost + NEXT_AFTER + json_size(name) > LIST_BUDGET then
-          if #page == 0 and row then
-            fail('too_large', 'The template ' .. named(name) .. ' is too large to list (' .. json_size(row) ..
-              ' bytes). To list the templates after it, set after to its name: ' .. name)
-          end
-          return list_result(page, last)
-        end
-        if row then page[#page + 1], size = row, size + cost end
-        last = name
+    local rows, more = app.db.query("SELECT hex, json_type(value, '$.tabs') AS tabs_type, json_array_length(value, '$.tabs') AS tabs,"
+      .. " json_extract(value, '$.saved_by') AS saved_by FROM templates WHERE ? IS NULL OR hex > ? ORDER BY hex LIMIT ?", from, from, LIST_MAX + 1)
+    for _, r in ipairs(rows) do
+      local k = 'template/' .. r.hex
+      local name = unhex(r.hex)
+      if not cursorable(name) then
+        if last ~= nil then return list_result(page, last) end
+        fail('too_large', 'The record ' .. named(k) .. ' is not a Templates record: its key is'
+          .. ' not hex, or its name is not valid UTF-8 or is over ' .. MAX_AFTER_JSON .. ' bytes as JSON. No cursor skips it.')
       end
-      if not res.next then return list_result(page, nil) end
-      scan_after = res.next
+      local row, cost = nil, 0
+      if r.tabs_type == 'array' or r.tabs_type == 'object' then
+        if #page == limit then return list_result(page, last) end
+        row = {name = name, tabs = r.tabs, saved_by = r.saved_by}
+        cost = json_size(row) + (#page > 0 and 1 or 0)
+      end
+      if size + cost + NEXT_AFTER + json_size(name) > LIST_BUDGET then
+        if #page == 0 and row then
+          fail('too_large', 'The template ' .. named(name) .. ' is too large to list (' .. json_size(row) ..
+            ' bytes). To list the templates after it, set after to its name: ' .. name)
+        end
+        return list_result(page, last)
+      end
+      if row then page[#page + 1], size = row, size + cost end
+      last = name
+      from = r.hex
     end
+    if not more and #rows <= LIST_MAX then return list_result(page, nil) end
   end
 end
 local function get_template(name)
-  local key = template_key(text(name, 'template'))
-  local r = hub('hub.store.get', {keys = {key}}).records[key]
+  local r = data.get_template(hex(text(name, 'template')))
   if not r or type(r.value) ~= 'table' or type(r.value.tabs) ~= 'table' then
     fail('not_found', 'The template ' .. named(name) .. ' does not exist')
   end
@@ -1611,5 +1623,9 @@ app.command({id = 'start_session', title = 'Start Session…', description = 'St
 app.command({id = 'save_template', title = 'Save as Template…', description = 'Save the tabs of this session as a template', keywords = {'template', 'workspace'}, route = '/forms/save', action = 'templates.save'})
 app.command({id = 'templates', title = 'Templates…', description = 'Saved session templates and recent starts', keywords = {'template'}, route = '/panels/templates', surface = 'panel', landing = true, user_only = 'navigation'})
 invalidate = function() hub('hub.ui.invalidate', {}) end
--- Starts that a restart interrupted continue from their durable records, after the registration.
-app.start(function() engine.resume(); pump() end, {after_register = true, tx = false})
+-- After the registration: the one-time import into SQL (templates_sql.lua), then the starts that a
+-- restart interrupted continue from their durable records.
+app.start(function()
+  data.import({scan_limit = run_module.SCAN_LIMIT, smaller = run_module.smaller})
+  engine.resume(); pump()
+end, {after_register = true, tx = false})

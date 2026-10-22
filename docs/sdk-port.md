@@ -65,12 +65,10 @@ CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT N
   record prefix (`template/`, `run/`, `run-counter`, `run-key/`, `start-form/`, `switch/`), in steps
   that each commit. `meta.import` records the last key of each prefix, so a crash continues the
   import.
-- Operation records cannot be imported: `hub.store.scan` reads records only, and `hub.store.op`
-  reads one operation by its exact key. Until the hub offers an export of a plugin's operation
-  records (asked of the hub owner), a key that is not in `ops` falls back to a read-only
-  `hub.store.op` (legacy replay), with the same fingerprint check. So old operations replay as long
-  as the hub keeps them. Without that fallback or an export, permanent replay of old operations is
-  not kept.
+- Operation records: `hub.store.ops_scan` (LazyRex hub/sql-r2 f6f1a03) lists the plugin's saved
+  operations. The import copies each operation of a kind that is in SQL into `ops` (key,
+  fingerprint and result unchanged). A kind that is still in the store reads `hub.store.op` until
+  its slice. No legacy fallback stays after a kind's import.
 - Rollback: after the SQL tables take new writes, the old store records are stale. Keeping them
   does not make a rollback safe. A rollback needs a coordinated backup of the hub and plugin files
   (sql.md, "Backup"), or a reverse migration.
@@ -117,6 +115,49 @@ operation replay (`hub.store.op`). Stage 2 moves the data to SQL (sections 3 and
 
 Tested: SDK origin/sdk/lua 62dde56 at `sdk/lua` of a LazyRex checkout at 0ae7451 (the launcher;
 no `hub.sql`), with `lazyrex-hub test -lazyrex <that checkout>`.
+
+## Stage 2
+
+The coordinator decided the storage design (2026-10-22): domain tables, in bounded slices. A run
+keeps its payload as one JSON column first. No generic key-value table, also not for a while. Short
+transactions replace the local conflict loops. A revision guard stays only where an external
+effect or a held revision needs it, and each guard that stays is listed here with its reason.
+
+### Slice 1: templates, and the save and delete operations
+
+- Tables: `meta`, `templates` and `ops` (`templates_sql.lua`). The engine records (runs, run keys,
+  start forms, switches) and the other operation kinds stay in hub.store until their slices.
+- Save, the two deletes, list, get, the panel, the forms and the start read and write SQL only.
+  `tests/sdk.lua` checks the complete call record: no hub.store call names a template record or a
+  save or delete operation.
+- Each write is one short transaction: the replay, the read and the write together. So the
+  conflicts "saved meanwhile" and "changed; try again" cannot happen any more.
+- Revision guards that stay:
+  - `templates.save` with `replace`: the agent holds the revision that `templates.get` gave.
+  - The Delete confirmation (`/forms/delete/<hex>/<rev>`): the user confirmed that revision.
+- Revisions: one counter in `meta`. Its floor is the revision of a store write (`sql-import`) at the
+  import, so it is above every revision that the store gave. An imported row keeps its store
+  revision, so a held revision of an old record still names it.
+- Request size: a hub.sql request carries a JSON value as a string parameter, so the value is
+  JSON-encoded twice (observed on Rex 0.0.1792158932-g88fd41: a 60 023-byte record of "&" gave a
+  70 271-byte request; the limit is 64 KiB). The row writer measures the complete frame (client ID,
+  action, SQL text, every parameter, a 32-digit token) and writes a long value in chunks in the
+  same transaction: an INSERT with the first chunk, then `value = value || ?`. A chunk is cut on a
+  UTF-8 boundary. The chunk budget (60 KiB) is internal; the record limits do not change. A row
+  whose key and other parameters alone are over the budget is refused (`too_large`; untested).
+- Import: at the start, after the registration and before the plugin serves (the SDK runs the start
+  code in its registration callback, and Rex Lua runs one handler at a time). Each record commits
+  with its cursor in one short transaction. An error stops the start, and the hub starts the plugin
+  again; the import continues at the cursor. A record that is written again is the same row. The
+  store records stay in the store; they are not a rollback path (section 3).
+- Tests: `tests/import.lua` (every record shape with its exact JSON text and rev, the operations,
+  the revision floor, a failed append between two chunks, a failed commit, a lost commit reply),
+  `tests/delete_confirm.lua` and `tests/replace.lua` (the guards, a lost commit reply and its
+  replay). The test helpers `W.twrite` and `W.trow` write and read template rows as another writer
+  would.
+- Not yet proved: the hub transaction deadline (10 s) with a row of many chunks. The largest
+  imported row in the tests has two chunks.
+- Tested: LazyRex hub/sql-r2 f6f1a03 with SDK origin/sdk/lua 42cebcc at `sdk/lua`.
 
 ## 6. SDK gaps (sent 2026-10-22)
 

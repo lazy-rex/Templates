@@ -13,7 +13,7 @@ local function tpl(name, title_len, saved_by)
 end
 -- put writes a template with a tab title of title_len "<" (6 bytes each when encoded).
 local function put(name, title_len, saved_by)
-  write({{key = 'template/' .. W.hex(name), value = tpl(name, title_len, saved_by)}})
+  W.twrite({{key = 'template/' .. W.hex(name), value = tpl(name, title_len, saved_by)}})
 end
 -- pages reads every page of templates.list with this limit, from after, and checks the size of
 -- each page with its next_after. It returns the names in reply order and the pages.
@@ -83,13 +83,13 @@ test('templates.get: GET_BUDGET counts the whole reply, with rev', function()
   local GET_BUDGET = 60 * 1024
   local function sized(name, total)
     for _ = 1, 3 do
-      write({{key = 'template/' .. W.hex(name), value = tpl(name, 1)}})
-      local rev = store('template/' .. W.hex(name)).rev
+      W.twrite({{key = 'template/' .. W.hex(name), value = tpl(name, 1)}})
+      local rev = W.trow('template/' .. W.hex(name)).rev
       local function reply(title) return {template = {name = name, tabs = {{title = title, layout = {launch = {shell = true}, dir = '.'}}}, saved_by = 'user'}, rev = rev} end
       local d = total - #rex.json.encode(reply(''))
       local title = string.rep('<', math.floor(d / 6)) .. string.rep('a', d % 6)
-      write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = {{title = title, layout = {launch = {shell = true}, dir = '.'}}}}}})
-      local now = store('template/' .. W.hex(name)).rev
+      W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = {{title = title, layout = {launch = {shell = true}, dir = '.'}}}}}})
+      local now = W.trow('template/' .. W.hex(name)).rev
       if #now == #rev then
         rev = now
         expect(#rex.json.encode(reply(title))).to_be(total)
@@ -142,7 +142,7 @@ end)
 
 test('templates.list accepts a removed name as cursor, and gives an empty page after the last name', function()
   local a = agent('alice')
-  write({{key = 'template/' .. W.hex('p-050'), delete = true}})
+  W.twrite({{key = 'template/' .. W.hex('p-050'), delete = true}})
   local page = a:call('templates.list', {after = 'p-049', limit = 2})
   expect(page.templates[1].name).to_be('p-051')
   page = a:call('templates.list', {after = 'p-050', limit = 1})
@@ -173,7 +173,7 @@ end)
 -- A key name whose value.name differs (another writer): the key's name is the identity.
 test('a record whose value.name differs from its key is listed and read by its key name', function()
   local a = agent('alice')
-  write({{key = 'template/' .. W.hex('m-key'), value = tpl('m-other')}})
+  W.twrite({{key = 'template/' .. W.hex('m-key'), value = tpl('m-other')}})
   local page = a:call('templates.list', {after = 'm', limit = 1})
   expect(page.templates[1].name).to_be('m-key')
   expect(a:call('templates.get', {template = 'm-key'}).template.name).to_be('m-key')
@@ -196,7 +196,7 @@ end)
 -- before it with next_after = the first row; page 2 starts at it and fails without a cursor.
 local function blocked(a, first, blocking_key, blocking_value, last)
   put(first)
-  write({{key = blocking_key, value = blocking_value}})
+  W.twrite({{key = blocking_key, value = blocking_value}})
   put(last)
   local page = a:call('templates.list', {after = first:sub(1, 1), limit = 5})
   expect(#page.templates).to_be(1)
@@ -205,7 +205,7 @@ local function blocked(a, first, blocking_key, blocking_value, last)
   local err = expect_error(function() a:call('templates.list', {after = page.next_after, limit = 5}) end, 'too_large')
   expect(tostring(err.message)).to_match('No cursor skips it')
   expect(#tostring(err.message) <= 512).to_be(true)
-  write({{key = blocking_key, delete = true}})
+  W.twrite({{key = blocking_key, delete = true}})
 end
 test('a foreign name between 8 KiB and 40 KiB encoded blocks the list without an invalid cursor', function()
   -- 1400 "<" is 8400 bytes encoded: not a cursor, but its summary fits 40 KB.
@@ -222,7 +222,7 @@ end)
 test('a record that is not a template is passed over, and its name can be the cursor', function()
   local a = agent('alice')
   put('y-1')
-  write({{key = 'template/' .. W.hex('y-2'), value = 7}})
+  W.twrite({{key = 'template/' .. W.hex('y-2'), value = 7}})
   put('y-3')
   local page = a:call('templates.list', {after = 'y', limit = 1})
   expect(page.templates[1].name).to_be('y-1')
@@ -258,7 +258,7 @@ end)
 -- The empty name (the key template/ alone): the first row of the store; after = '' skips it.
 test('an empty name is listed first and round-trips as a cursor', function()
   local a = agent('alice')
-  write({{key = 'template/', value = tpl('')}})
+  W.twrite({{key = 'template/', value = tpl('')}})
   local page = a:call('templates.list', {limit = 1})
   expect(page.templates[1].name).to_be('')
   expect(page.next_after).to_be('')
@@ -273,7 +273,7 @@ test('a name that is not valid UTF-8 blocks the list; a valid multibyte name rou
   local a = agent('alice')
   local e1, e2, e3 = '\195\169-1', '\195\169-2\255', '\195\169-3' -- "é-1", "é-2" and the byte ff, "é-3"
   put(e1)
-  write({{key = 'template/' .. W.hex(e2), value = tpl('foreign')}})
+  W.twrite({{key = 'template/' .. W.hex(e2), value = tpl('foreign')}})
   put(e3)
   local page = a:call('templates.list', {after = '\195\169', limit = 5})
   expect(#page.templates).to_be(1)
@@ -282,17 +282,17 @@ test('a name that is not valid UTF-8 blocks the list; a valid multibyte name rou
   local err = expect_error(function() a:call('templates.list', {after = e1, limit = 5}) end, 'too_large')
   expect(tostring(err.message)).to_match('No cursor skips it')
   expect(#tostring(err.message) <= 512).to_be(true)
-  write({{key = 'template/' .. W.hex(e2), delete = true}})
+  W.twrite({{key = 'template/' .. W.hex(e2), delete = true}})
   -- Valid multibyte names: each next_after is accepted again and moves on.
   page = a:call('templates.list', {after = '\195\169', limit = 1})
   expect(page.next_after).to_be(e1)
   expect(a:call('templates.list', {after = page.next_after, limit = 1}).templates[1].name).to_be(e3)
   -- The probe: template/ff and template/ffff after the last valid name.
-  write({{key = 'template/ff', value = {name = 'foreign', tabs = {}, saved_by = 'user'}},
+  W.twrite({{key = 'template/ff', value = {name = 'foreign', tabs = {}, saved_by = 'user'}},
     {key = 'template/ffff', value = {name = 'foreign', tabs = {}, saved_by = 'user'}}})
   page = a:call('templates.list', {after = '\195\169', limit = 5})
   expect(#page.templates).to_be(2)
   expect(page.next_after).to_be(e3)
   expect_error(function() a:call('templates.list', {after = e3, limit = 1}) end, 'too_large')
-  write({{key = 'template/ff', delete = true}, {key = 'template/ffff', delete = true}})
+  W.twrite({{key = 'template/ff', delete = true}, {key = 'template/ffff', delete = true}})
 end)

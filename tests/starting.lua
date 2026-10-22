@@ -12,7 +12,7 @@ local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 -- "Starting…".
 local function waiting(name, op_key)
   local s, root = W.workspace()
-  write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, tabs = {{title = 'shell', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, tabs = {{title = 'shell', layout = {launch = {shell = true}, dir = '.'}}}}}})
   local form = W.open('start_session', '/forms/start', s)
   local values = W.form_input(form:render(), 'start_session')
   values.template, values.root, values.session_id = name, root, '@new'

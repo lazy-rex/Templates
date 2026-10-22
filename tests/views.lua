@@ -124,10 +124,10 @@ test('the Start form opens with 300 long template names; the default is the firs
     local name = string.format('%03d', i) .. string.rep('<', 57)
     local value = {v = 1, name = name, saved_by = 'user', tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}}
     local cost = #rex.json.encode(value) + 200
-    if #ops > 0 and n + cost > 40000 then write(ops); ops, n = {}, 0 end
+    if #ops > 0 and n + cost > 40000 then W.twrite(ops); ops, n = {}, 0 end
     ops[#ops + 1], n = {key = 'template/' .. W.hex(name), value = value}, n + cost
   end
-  write(ops)
+  W.twrite(ops)
   local tree = W.open('start_session', '/forms/start', s):render()
   expect(size(tree) <= BUDGET).to_be(true)
   local field = W.field(tree, 'start_session', 'template')

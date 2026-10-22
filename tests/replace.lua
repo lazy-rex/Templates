@@ -41,7 +41,7 @@ test('agent: templates.get gives rev; save with replace = rev replaces exactly t
   local alice, bob = agent('alice'), agent('bob')
   local root = saved(alice, 'rp-a')
   local got = alice:call('templates.get', {template = 'rp-a'})
-  expect(got.rev).to_be(store(key('rp-a')).rev)
+  expect(got.rev).to_be(W.trow(key('rp-a')).rev)
   expect(titles(got.template)).to_equal({'code', 'logs'})
   local s = source(bob, root, 'solo')
   -- Without replace: the name is kept.
@@ -49,7 +49,7 @@ test('agent: templates.get gives rev; save with replace = rev replaces exactly t
     bob:call('templates.save', {name = 'rp-a', root = root, session_id = s, key = 'rp-a-keep'})
   end, 'conflict')
   expect(tostring(err.message)).to_match('templates.get gives its rev')
-  expect(store(key('rp-a')).rev).to_be(got.rev)
+  expect(W.trow(key('rp-a')).rev).to_be(got.rev)
   -- With replace: new tabs and saved_by; a new rev.
   expect(bob:call('templates.save', {name = 'rp-a', root = root, session_id = s, replace = got.rev, key = 'rp-a-rep'})).to_equal({name = 'rp-a'})
   local again = alice:call('templates.get', {template = 'rp-a'})
@@ -65,36 +65,36 @@ test('agent: a stale rev (replaced or deleted since) and a name with no record g
   local s = source(alice, root, 'solo')
   -- Replaced since the read.
   alice:call('templates.save', {name = 'rp-stale', root = root, session_id = s, replace = old, key = 'rp-stale-1'})
-  local now = store(key('rp-stale'))
+  local now = W.trow(key('rp-stale'))
   local err = expect_error(function()
     alice:call('templates.save', {name = 'rp-stale', root = root, session_id = s, replace = old, key = 'rp-stale-2'})
   end, 'conflict')
   expect(tostring(err.message)).to_match('changed or was deleted after you read it')
-  expect(store(key('rp-stale')).rev).to_be(now.rev)
+  expect(W.trow(key('rp-stale')).rev).to_be(now.rev)
   -- Deleted since the read.
   alice:call('templates.delete', {template = 'rp-stale', key = 'rp-stale-del'})
   expect_error(function()
     alice:call('templates.save', {name = 'rp-stale', root = root, session_id = s, replace = now.rev, key = 'rp-stale-3'})
   end, 'conflict')
-  expect(store(key('rp-stale')).value).to_be(nil)
+  expect(W.trow(key('rp-stale')).value).to_be(nil)
   -- No record at all.
   expect_error(function()
     alice:call('templates.save', {name = 'rp-none', root = root, session_id = s, replace = '1', key = 'rp-none'})
   end, 'conflict')
-  expect(store(key('rp-none')).value).to_be(nil)
+  expect(W.trow(key('rp-none')).value).to_be(nil)
 end)
 
 test('agent: replace must be a canonical nonzero rev string', function()
   local alice = agent('alice')
   local root = saved(alice, 'rp-bad')
   local s = source(alice, root, 'solo')
-  local before = store(key('rp-bad')).rev
+  local before = W.trow(key('rp-bad')).rev
   for i, bad in ipairs({'0', '00', '01', '', 'abc', '1a', ' 1', '-1', '1.0', '1' .. string.rep('0', 20), 5, true, {}}) do
     local ok, err = pcall(alice.call, alice, 'templates.save', {name = 'rp-bad', root = root, session_id = s, replace = bad, key = 'rp-bad-' .. i})
     expect(ok).to_be(false)
     expect(err.code == 'invalid_input' or err.code == 'bad_request').to_be(true)
   end
-  expect(store(key('rp-bad')).rev).to_be(before)
+  expect(W.trow(key('rp-bad')).rev).to_be(before)
 end)
 
 test('agent: a replay answers first; other args give operation_conflict; a lost reply after a recreation', function()
@@ -105,16 +105,17 @@ test('agent: a replay answers first; other args give operation_conflict; a lost 
   local args = {name = 'rp-replay', root = root, session_id = s, replace = rev, key = 'rp-replay-1'}
   local first = alice:call('templates.save', args)
   expect(alice:call('templates.save', args)).to_equal(first)
-  local other = {name = 'rp-replay', root = root, session_id = s, replace = store(key('rp-replay')).rev, key = 'rp-replay-1'}
+  local other = {name = 'rp-replay', root = root, session_id = s, replace = W.trow(key('rp-replay')).rev, key = 'rp-replay-1'}
   expect_error(function() alice:call('templates.save', other) end, 'operation_conflict')
-  -- A lost reply: another invocation committed the same replacement, then the template was
-  -- recreated. The retry returns the saved result and keeps the recreated template.
-  local rev2 = store(key('rp-replay')).rev
-  local inj = inject({match = {writes = key('rp-replay')}, replay = true,
-    ops = {{key = key('rp-replay'), value = {v = 1, name = 'rp-replay', saved_by = 'user', tabs = {{title = 'recreated', layout = {launch = {shell = true}, dir = '.'}}}}}}})
-  local r = alice:call('templates.save', {name = 'rp-replay', root = root, session_id = s, replace = rev2, key = 'rp-replay-2'})
+  -- A lost commit reply: the replacement committed and the agent got a transient error. Then the
+  -- template was recreated. The retry returns the saved result and keeps the recreated template.
+  local rev2 = W.trow(key('rp-replay')).rev
+  local args2 = {name = 'rp-replay', root = root, session_id = s, replace = rev2, key = 'rp-replay-2'}
+  local inj = inject({match = {sql_commit_writes = 'templates'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
+  expect_error(function() alice:call('templates.save', args2) end, 'unavailable')
   expect(injection(inj).consumed).to_be(1)
-  expect(r).to_equal({name = 'rp-replay'})
+  W.twrite({{key = key('rp-replay'), value = {v = 1, name = 'rp-replay', saved_by = 'user', tabs = {{title = 'recreated', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  expect(alice:call('templates.save', args2)).to_equal({name = 'rp-replay'})
   expect(titles(W.template('rp-replay'))).to_equal({'recreated'})
 end)
 
@@ -123,14 +124,14 @@ end)
 test('a save operation saved before replace existed replays unchanged (agent and form)', function()
   local alice = agent('alice')
   -- Agent: save-agent-v1/ + canon{name, panes, root, session_id}, without replace.
-  put_operation({key = 'save/agent/' .. part('alice') .. part('rp-old-agent'),
+  W.put_op({key = 'save/agent/' .. part('alice') .. part('rp-old-agent'),
     fingerprint = 'save-agent-v1/{4:names6:rp-old5:panes{}4:roots9:/old-root10:session_ids5:old-s}',
     result = {name = 'rp-old'}})
   expect(alice:call('templates.save', {name = 'rp-old', root = '/old-root', session_id = 'old-s', key = 'rp-old-agent'})).to_equal({name = 'rp-old'})
   -- Form: save-v2/ + session + the values of an old form (no replace field). The values name no
   -- pane, so without the replay the save would fail (the session changed).
   local s = W.workspace()
-  put_operation({key = 'save/' .. part('rp-old-form'),
+  W.put_op({key = 'save/' .. part('rp-old-form'),
     fingerprint = 'save-v2/' .. part(s) .. part('name') .. part('rp-old-f') .. part('root') .. part('/old-root'),
     result = {close_form = true}})
   local form = W.open('save_template', '/forms/save', s)
@@ -138,13 +139,13 @@ test('a save operation saved before replace existed replays unchanged (agent and
   local op = form:action('save_template', 'submit', {values = {name = 'rp-old-f', root = '/old-root'}}, 'rp-old-form')
   expect(op.status).to_be('succeeded')
   expect(op.result).to_equal({close_form = true})
-  expect(store(key('rp-old-f')).value).to_be(nil)
+  expect(W.trow(key('rp-old-f')).value).to_be(nil)
 end)
 
 test('form: Keep it (the default) refuses an existing name; Replace it replaces; a new name saves', function()
   local alice = agent('alice')
   local root = saved(alice, 'rp-form')
-  local before = store(key('rp-form'))
+  local before = W.trow(key('rp-form'))
   local s = source(alice, root, 'solo')
   local tree = W.open('save_template', '/forms/save', s):render()
   local field = W.field(tree, 'save_template', 'replace')
@@ -154,7 +155,7 @@ test('form: Keep it (the default) refuses an existing name; Replace it replaces;
   expect(kept.status).to_be('failed')
   expect(kept.error.code).to_be('conflict')
   expect(tostring(kept.error.message)).to_match('choose Replace it')
-  expect(store(key('rp-form')).rev).to_be(before.rev)
+  expect(W.trow(key('rp-form')).rev).to_be(before.rev)
   local done = form_save(s, 'rp-form', root, 'replace', 'rp-form-rep')
   expect(done.status).to_be('succeeded')
   expect(done.result).to_equal({close_form = true})
@@ -168,36 +169,29 @@ end)
 test('form: a replace value other than keep or replace is invalid_input', function()
   local alice = agent('alice')
   local root = saved(alice, 'rp-fbad')
-  local before = store(key('rp-fbad')).rev
+  local before = W.trow(key('rp-fbad')).rev
   local s = source(alice, root, 'solo')
   for i, bad in ipairs({'yes', '', 'Replace', 1, true}) do
     local op = form_save(s, 'rp-fbad', root, bad, 'rp-fbad-' .. i)
     expect(op.status).to_be('failed')
     expect(op.error.code).to_be('invalid_input')
   end
-  expect(store(key('rp-fbad')).rev).to_be(before)
+  expect(W.trow(key('rp-fbad')).rev).to_be(before)
 end)
 
-test('form: a record replaced or deleted after the read and before the batch gives conflict', function()
+-- The form's Replace it replaces the template as it is at the commit: one transaction reads and
+-- writes it (templates.lua, save_core), so no change can come between the read and the write.
+test('form: Replace it replaces the template as another writer left it, also after a delete', function()
   local alice = agent('alice')
   local root = saved(alice, 'rp-race')
   local s = source(alice, root, 'solo')
   local other = {v = 1, name = 'rp-race', saved_by = 'user', tabs = {{title = 'other', layout = {launch = {shell = true}, dir = '.'}}}}
-  local inj = inject({match = {reads = key('rp-race')}, ops = {{key = key('rp-race'), value = other}}})
-  local op = form_save(s, 'rp-race', root, 'replace', 'rp-race-1')
-  expect(injection(inj).consumed).to_be(1)
-  expect(op.status).to_be('failed')
-  expect(op.error.code).to_be('conflict')
-  expect(tostring(op.error.message)).to_match('Submit again to replace it')
-  expect(titles(W.template('rp-race'))).to_equal({'other'})
-  -- Deleted after the read: conflict; nothing is saved.
-  inj = inject({match = {reads = key('rp-race')}, ops = {{key = key('rp-race'), delete = true}}})
-  op = form_save(s, 'rp-race', root, 'replace', 'rp-race-2')
-  expect(injection(inj).consumed).to_be(1)
-  expect(op.error.code).to_be('conflict')
-  expect(store(key('rp-race')).value).to_be(nil)
-  -- A new deliberate submit reads the new state and saves.
-  expect(form_save(s, 'rp-race', root, 'replace', 'rp-race-3').status).to_be('succeeded')
+  W.twrite({{key = key('rp-race'), value = other}})
+  expect(form_save(s, 'rp-race', root, 'replace', 'rp-race-1').status).to_be('succeeded')
+  expect(titles(W.template('rp-race'))).to_equal({'solo'})
+  W.twrite({{key = key('rp-race'), delete = true}})
+  expect(form_save(s, 'rp-race', root, 'replace', 'rp-race-2').status).to_be('succeeded')
+  expect(titles(W.template('rp-race'))).to_equal({'solo'})
 end)
 
 -- server_pane: a session with a shell pane and a server pane with the arg port = value (as in
@@ -224,7 +218,7 @@ test('a replacement too large to start at its root is refused; the old template 
   local alice = agent('alice')
   local small, home = server_pane(alice, 'small')
   alice:call('templates.save', {name = 'rp-big', root = home, session_id = small, key = 'rp-big-save'})
-  local before = store(key('rp-big'))
+  local before = W.trow(key('rp-big'))
   local big = server_pane(alice, string.rep('&', 4000))
   local err = expect_error(function()
     alice:call('templates.save', {name = 'rp-big', root = home, session_id = big, replace = before.rev, key = 'rp-big-agent'})
@@ -233,7 +227,7 @@ test('a replacement too large to start at its root is refused; the old template 
   local op = form_save(big, 'rp-big', home, 'replace', 'rp-big-form')
   expect(op.status).to_be('failed')
   expect(tostring(op.error.message)).to_match('too large to start')
-  local after = store(key('rp-big'))
+  local after = W.trow(key('rp-big'))
   expect(after.rev).to_be(before.rev)
   expect(after.value).to_equal(before.value)
 end)
@@ -249,7 +243,7 @@ test('a delete confirmation opened before a replacement cannot delete it; its fo
   expect(p:action('templates', 'open', {item_id = hx}, 'rp-del-open').status).to_be('succeeded')
   local menu = user:view('/forms/template/' .. hx, nil, s)
   menu:render()
-  local rev = store(key('rp-del')).rev
+  local rev = W.trow(key('rp-del')).rev
   expect(menu:action('template_menu', 'delete', {item_id = 'delete'}, 'rp-del-menu').status).to_be('succeeded')
   local confirm = user:view('/forms/delete/' .. hx .. '/' .. rev, nil, s)
   confirm:render()

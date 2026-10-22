@@ -73,7 +73,7 @@ test('delete: an agent deletes any template, also one that another agent saved',
   expect(find(alice:call('templates.list', {}).templates, 'name', 'd-alice').saved_by).to_be('alice')
   expect(alice:call('templates.delete', {template = 'd-alice', key = 'del-2'})).to_equal({})
   -- A template that the user saved (and one from before saved_by) is an agent's to delete too.
-  write({{key = 'template/' .. W.hex('d-user'), value = {v = 1, name = 'd-user', saved_by = 'user', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}},
+  W.twrite({{key = 'template/' .. W.hex('d-user'), value = {v = 1, name = 'd-user', saved_by = 'user', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}},
     {key = 'template/' .. W.hex('d-old'), value = {v = 1, name = 'd-old', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
   expect(bob:call('templates.delete', {template = 'd-user', key = 'del-user'})).to_equal({})
   expect(bob:call('templates.delete', {template = 'd-old', key = 'del-old'})).to_equal({})
@@ -189,7 +189,7 @@ end)
 -- The reviewer's cases (2da0f11 review). A template that alice saved, started into a session that
 -- does not exist, so its first tab blocks.
 local function seed_blocked()
-  write({{key = 'template/726576696577', value = {v = 1, name = 'review', saved_by = 'alice',
+  W.twrite({{key = 'template/726576696577', value = {v = 1, name = 'review', saved_by = 'alice',
     tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
 end
 local function blocked_args(key)

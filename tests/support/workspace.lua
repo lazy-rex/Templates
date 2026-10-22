@@ -123,7 +123,50 @@ function W.wait_run(a, id, status)
 end
 -- next_run_id is the ID that the next admitted run gets (run-counter + 1; small numbers only).
 function W.next_run_id() return tostring((tonumber(store('run-counter').value) or 0) + 1) end
-function W.template(name) return store('template/' .. W.hex(name)).value end
+-- Template rows (templates_sql.lua). A test reads and writes them as another writer would, with
+-- the old record shapes: W.trow(key) is like store(key) for a key 'template/<hex>' ({rev, value},
+-- or {} when absent), and W.twrite(ops) is like write(ops): a 'template/' op goes to the SQL row
+-- (with a new revision from the plugin's counter), any other op to the store.
+function W.trow(key)
+  local row = sql('SELECT CAST(rev AS TEXT) AS rev, value FROM templates WHERE hex = ?', {key:sub(#'template/' + 1)})[1]
+  if not row then return {} end
+  return {rev = row.rev, value = rex.json.decode(row.value)}
+end
+function W.twrite(ops)
+  local rest = {}
+  for _, op in ipairs(ops) do
+    if op.key:sub(1, #'template/') == 'template/' then
+      local hx = op.key:sub(#'template/' + 1)
+      if op.delete then
+        sql_write('DELETE FROM templates WHERE hex = ?', {hx})
+      else
+        local rev = tonumber(sql("SELECT v FROM meta WHERE k = 'rev'")[1].v) + 1
+        sql_write("UPDATE meta SET v = ? WHERE k = 'rev'", {tostring(rev)})
+        -- A large value goes to a staging row in parts (a request is at most 64 KiB), then into the
+        -- template row in one statement: the plugin never reads a partial value.
+        local text, pos = rex.json.encode(op.value), 1
+        sql_write("INSERT INTO meta (k, v) VALUES ('test-stage', '') ON CONFLICT (k) DO UPDATE SET v = ''")
+        while pos <= #text do
+          local n = math.min(8000, #text - pos + 1)
+          while pos + n <= #text and text:byte(pos + n) >= 0x80 and text:byte(pos + n) < 0xC0 do n = n - 1 end
+          sql_write("UPDATE meta SET v = v || ? WHERE k = 'test-stage'", {text:sub(pos, pos + n - 1)})
+          pos = pos + n
+        end
+        sql_write("INSERT INTO templates (hex, rev, value) SELECT ?, ?, v FROM meta WHERE k = 'test-stage'"
+          .. ' ON CONFLICT (hex) DO UPDATE SET rev = excluded.rev, value = excluded.value', {hx, rev})
+        sql_write("DELETE FROM meta WHERE k = 'test-stage'")
+      end
+    else
+      rest[#rest + 1] = op
+    end
+  end
+  if #rest > 0 then write(rest) end
+end
+-- put_op saves an operation reply in SQL, as an older version saved it (and the import copied it).
+function W.put_op(op)
+  sql_write('INSERT INTO ops (key, fingerprint, result) VALUES (?, ?, ?)', {op.key, op.fingerprint, rex.json.encode(op.result)})
+end
+function W.template(name) return W.trow('template/' .. W.hex(name)).value end
 -- The records of a UI start with operation key key.
 function W.start_form_key(key) return 'start-form/' .. W.hex('start/' .. W.part(key)) end
 -- The start record of an agent's start: 'start/agent/' .. part(agent) .. part(key).
@@ -139,7 +182,7 @@ function W.ui_delete(s, name, key)
   p:action('templates', 'open', {item_id = hx}, key .. '-open')
   local menu = user:view('/forms/template/' .. hx, nil, s)
   menu:render()
-  local rev = store('template/' .. hx).rev
+  local rev = W.trow('template/' .. hx).rev
   menu:action('template_menu', 'delete', {item_id = 'delete'}, key .. '-menu')
   local confirm = user:view('/forms/delete/' .. hx .. '/' .. rev, nil, s)
   confirm:render()

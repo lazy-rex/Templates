@@ -191,9 +191,10 @@ A template row in the Templates panel opens the template menu. One Enter does no
 template. Code: `templates.lua`, `menu_view`, `delete_view`, `delete_ui`. Tests:
 `tests/delete_confirm.lua`.
 
-- **Identity.** A template is named by the hex of its storage key (`template/<hex>`), not by
-  `value.name`: a record that Templates did not write can have another name inside. The panel row
-  ID, the routes and every read use that hex.
+- **Identity.** A template is named by the hex of its name: the key of its SQL row
+  (`templates.hex`; the old store key was `template/<hex>`), not `value.name`. A record that
+  Templates did not write can have another name inside. The panel row ID, the routes and every read
+  use that hex.
 - **Routes.** The hub opens any form route that starts with `/forms/` (checked in the source of hub
   6c48bf7, and observed with a lab probe on Rex 0.0.1792158932-g88fd41: the route reached render
   and action unchanged). Each route is an exact pattern. Anything else is `invalid_input`, at
@@ -213,7 +214,8 @@ template. Code: `templates.lua`, `menu_view`, `delete_view`, `delete_ui`. Tests:
   not valid UTF-8) cannot be an option: that Start form says so and has no submit. The form never
   selects another template instead.
 - **Delete.** The key and the rev come from the route only. The replay of a saved operation answers
-  first. Then one batch deletes `template/<hex>` with `if_rev` = rev, with no read before it: a
+  first. Then one short transaction deletes the row only if its rev is the route's rev, and saves
+  the operation. This revision guard stays in SQL because the user confirmed that revision: a
   template replaced after the choice is kept (`conflict`). The fingerprint is
   `delete-ui-v1/` + part(hex) + part(rev), so the same operation key on another route is
   `operation_conflict`. The result is `{close_form = true}`: the hub returns to the panel.
@@ -230,18 +232,20 @@ A save keeps an existing template with the same name (`conflict`), unless the ca
 replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
 
 - **Agent.** `templates.get` gives `{template, rev}`, both from one record response. `rev` is a
-  decimal string. `templates.save` with `replace = rev` replaces exactly that revision: one batch
-  with `if_rev = rev`, with no read. A template that changed or was deleted since gives `conflict`,
+  decimal string. `templates.save` with `replace = rev` replaces exactly that revision: one short
+  transaction replaces the row only if its rev is `rev`. This revision guard stays because the agent
+  holds the revision that it read. A template that changed or was deleted since gives `conflict`,
   and a name with no record gives `conflict`. `replace` is a canonical nonzero revision (no `0`, no
   leading zero, at most 20 digits), else `invalid_input`.
 - **Form.** The field "If a template has this name" is "Keep it (do not save)" (`keep`, the
   default) or "Replace it" (`replace`). It authorizes the replacement of the record as it is at the
-  submit, not as it was when the form opened. The submit reads the record once, after the capture
-  and the size check and just before the batch, and writes with that `if_rev` (`'0'` when absent:
-  a new save). A record replaced or deleted between the read and the batch gives `conflict`; the
-  submit does not retry. A new submit reads the new state. A missing field (a form of an older
+  submit, not as it was when the form opened. After the capture and the size check, one short
+  transaction reads the template and writes it. So Replace it replaces the template as it is at the
+  commit, also one that another writer changed or deleted after the form opened, and Keep it gives
+  `conflict` when a template with the name exists at the commit. No change can come between the
+  read and the write, so the form has no revision guard. A missing field (a form of an older
   plugin) means `keep`; another value is `invalid_input`.
-- **Unchanged.** The operation and the template commit in one batch. A replay answers before the
+- **Unchanged.** The operation and the template commit in one transaction. A replay answers before the
   capture and every check. An omitted `replace` leaves the agent fingerprint as before, and a form
   without the field keeps its fingerprint. The save size check runs before the write: a refused
   replacement leaves the old template and its rev. `saved_by` is the new saver.

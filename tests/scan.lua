@@ -61,7 +61,7 @@ test('every template is listed once over more than 1 MiB of templates', function
   local s = W.workspace()
   for i = 1, 18 do
     local name = string.format('big-template-%02d', i)
-    write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user',
+    W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user',
       tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}, pad = string.rep('<', 10000)}}})
   end
   local names = {}

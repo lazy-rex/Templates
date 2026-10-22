@@ -233,7 +233,7 @@ end)
 test('one tab: a run is not retired before its Start form\'s switch; the form succeeds with one session', function()
   local alice = agent('alice')
   local s, root = W.workspace()
-  write({{key = 'template/' .. W.hex('ret-single'), value = {v = 1, name = 'ret-single',
+  W.twrite({{key = 'template/' .. W.hex('ret-single'), value = {v = 1, name = 'ret-single',
     tabs = {{title = 'shell', layout = {launch = {shell = true}, dir = '.'}}}}}})
   local form = W.open('start_session', '/forms/start', s)
   local values = W.form_input(form:render(), 'start_session')

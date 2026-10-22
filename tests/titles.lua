@@ -24,7 +24,7 @@ local SOURCE = {
 -- the workers of its panes (block -> {profile, title}).
 local function started(alice, name, tabs, root)
   S.n = S.n + 1
-  write({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = tabs}}})
+  W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = tabs}}})
   local r = alice:call('templates.start', {template = name, root = root, key = name .. '-start-' .. S.n})
   W.wait_run(alice, r.run_id, 'open')
   local s = store('run/' .. r.run_id).value.session_id
