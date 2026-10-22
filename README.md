@@ -109,12 +109,13 @@ views and agent outputs have a size limit:
 
 ## Known issue: an open Save form slows starts (open)
 
-The hub renders an open Save form again after each SQL change of the plugin and each
-worker change (SQL: the source of LazyRex f413b36; not checked on a later hub), and a start makes many of these. Each render captures the source session again. A Save
-render checks each directory once (`tests/templates-run.md`, "Save form renders"). The
+The hub renders an open Save form again after each SQL change of the plugin and each worker
+change (SQL: the source of LazyRex f413b36; not checked on a later hub), and a start makes many of
+these. Each render captures the source session again. A Save render checks each directory once (`tests/templates-run.md`, "Save form renders"). The
 latency target (a start with the Save form open takes at most twice the time of a start without
-it) is not met yet: 2.1 times in a lab run on a loaded host. The Save form will declare its render
-dependencies when the hub supports them. A quiet performance run follows that change.
+it) is not met yet: 2.1 times in a lab run on a loaded host. Read tracking does not change this: the
+Save render reads no table and calls Rex and the hub, so it stays broad (hub main d912148, not
+released). A quiet performance run measures the next change of the Save render.
 
 ## Retention
 

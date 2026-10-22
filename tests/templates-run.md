@@ -245,11 +245,11 @@ replace it. Code: `templates.lua`, `save_core`. Tests: `tests/replace.lua`.
   transaction reads the template and writes it. So Replace it replaces the template as it is at the
   commit, also one that another writer changed or deleted after the form opened, and Keep it gives
   `conflict` when a template with the name exists at the commit. No change can come between the
-  read and the write, so the form has no revision guard. A missing field (a form of an older
-  plugin) means `keep`; another value is `invalid_input`.
+  read and the write, so the form has no revision guard. A missing field means `keep`; another value
+  is `invalid_input`.
 - **Unchanged.** The operation and the template commit in one transaction. A replay answers before the
-  capture and every check. An omitted `replace` is not in the agent or the form fingerprint. The save size check runs before the write: a refused
-  replacement leaves the old template and its rev. `saved_by` is the new saver.
+  capture and every check. An omitted `replace` is not in the agent or the form fingerprint. The
+  save size check runs before the write: a refused replacement leaves the old template and its rev. `saved_by` is the new saver.
 - **Other features.** A delete confirmation of the old revision gets `conflict` and then shows no
   submit ("Panel delete"). A start that is running keeps its frozen template.
 
@@ -341,15 +341,21 @@ justified revision guards remain"):
 - `runs.ver`: an engine step that calls the hub between its read and its write.
 - `start_forms.rev`: a retention marker's `form_rev` names the form of its retired run.
 
-Operation replay. Each write handler runs its replay check, its reads and its writes in one short
-transaction. The `ops` key is `<kind>/<part(key)>`, or `<kind>/agent/<part(id)><part(key)>` for
-each ID of an agent, so one key can name one operation of each kind. The fingerprints:
+Operation replay. A write handler commits its change and its saved reply (an `ops` row) in one
+short transaction: a lost reply replays, and a refused commit leaves neither. Save checks the
+replay first, captures the session outside the transaction, and then checks the replay again in
+the transaction that reads and writes the template (with `replace`, also the held rev). Dismiss
+and retry check the replay first; then one transaction reads the run and writes it with the reply
+(a reply that another call saved meanwhile replays: `op_exists`). The `ops` key is
+`<kind>/<part(key)>`, or `<kind>/agent/<part(id)><part(key)>` for each ID of an agent, so one key
+can name one operation of each kind. The fingerprints:
 
 - UI save: `save-v2/` + the source session ID + the submitted values in key order.
 - Agent save: `save-agent-v1/` + the canonical arguments (`canon`).
 - Delete confirmation: `delete-ui-v1/` + hex + rev. Dismiss and retry: the kind + the run ID.
 
-An optional field that is absent (for example `replace`) is not in the text of a save fingerprint.
+An omitted `replace` is not in the text of a save fingerprint (agent or form). The other optional
+agent arguments are in it with their defaults: `session_id` as false, `panes` as an empty object.
 
 A saved reply replays without a time limit, and no `ops` row expires (decision "lazyrex release 4
 keeps private operation tables until SDK replay covers their guarantees"). Starts do not use `ops`:
@@ -401,9 +407,8 @@ transaction 5 s after its last call or 10 s after its start (LazyRex `docs/sql.m
 bounds the calls, not their time: on a slow host the commit can fail with `tx_expired`, and then
 nothing is committed (`tests/sql_runs.lua` refuses the commit to check that state).
 
-The bound applies to new admissions. A run that an older version admitted, larger than 61 KiB,
-is not changed: its same-key admission still returns it (no size check comes first), and another
-request with its key still conflicts. A repair of such runs is not part of this bound.
+The bound applies to admissions of new runs. A replay checks no size: the same-key admission of
+a run larger than 61 KiB returns it, and another request with its key conflicts.
 
 Measured on a lab hub (tests/limits.lua): a run record is about 3 times its template. A template
 of 18 KB in one tab opens on both paths; one of 20 KB in one tab of two panes is refused on both
@@ -453,11 +458,14 @@ admission still applies. Tests: `tests/save_size.lua` and the measure cases in `
 
 ## Render inputs
 
-The hub renders a view again after an SQL commit when the view read a table that the commit
-changed, or after every commit when it cannot know what the render read (LazyRex `docs/hub.md`,
-"SQL read tracking"). The hub sees only the hub calls of a render. It cannot see Rex calls, Lua
-state, environment variables, files, subprocesses or the clock. This list gives the inputs of each
-view outside SQL (read in source):
+On the released hub (v0.4.1), each SQL commit of the plugin renders every open view again. Hub
+main d912148 (not released; planned for hub 4.2) tracks reads by default: it renders a view again
+after a write to a table that its render read, after its own action, and after `app.refresh()`.
+There the SDK makes a render broad (each SQL commit renders it again) when the render calls Rex,
+reads files or runs a subprocess, makes a hub call other than an SQL query, or has a failed hub
+call. A Lua value that a render shows needs `app.refresh()` when it changes (LazyRex
+`docs/plugin-sdk.md` on hub main). This list gives the inputs of each view outside SQL (read in
+source):
 
 - Panel (`/panels/templates`): templates, runs, run counts and switches from SQL. Outside SQL:
   `HOME` only (`short`), which does not change while the plugin runs.

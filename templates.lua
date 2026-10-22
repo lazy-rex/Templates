@@ -7,8 +7,8 @@
 -- The Plugin SDK (LazyRex sdk/lua) registers the plugin and dispatches the hub calls. Each action
 -- and view has {tx = false, store = false}: the SDK opens no transaction around a handler and saves
 -- no reply. The data is in SQL (templates_sql.lua; tests/templates-run.md, "Storage"): each step
--- opens its own short transactions, and Templates keeps its own operation replies (ops,
--- start_forms).
+-- opens its own short transactions, and Templates keeps its own operation replies (ops)
+-- and the frozen requests of starts (start_forms).
 local app = require('lazyrex').plugin('templates')
 local function fail(code, message) error({code = code, message = message}) end
 local function text(value, name)

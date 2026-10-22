@@ -129,7 +129,7 @@ test('a save operation without replace replays unchanged (agent and form)', func
     fingerprint = 'save-agent-v1/{4:names6:rp-old5:panes{}4:roots9:/old-root10:session_ids5:old-s}',
     result = {name = 'rp-old'}})
   expect(alice:call('templates.save', {name = 'rp-old', root = '/old-root', session_id = 'old-s', key = 'rp-old-agent'})).to_equal({name = 'rp-old'})
-  -- Form: save-v2/ + session + the values of an old form (no replace field). The values name no
+  -- Form: save-v2/ + session + the values of a form without the replace field. The values name no
   -- pane, so without the replay the save would fail (the session changed).
   local s = W.workspace()
   W.put_op({key = 'save/' .. part('rp-old-form'),
