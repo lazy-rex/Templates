@@ -237,7 +237,6 @@ function W.put_run_key(key, row)
     .. ' SET run_id = excluded.run_id, expired_at = excluded.expired_at, form_rev = excluded.form_rev',
     {key, row.run_id, null(row.expired_at), null(row.form_rev)})
 end
-function W.delete_run_key(key) W.sql_write('DELETE FROM run_keys WHERE key = ?', {key}) end
 
 -- Start forms: {rev, fingerprint, request, at}. W.put_form writes a form with a new revision and
 -- returns it.
@@ -256,7 +255,6 @@ function W.put_form(key, form)
   unstage()
   return rev
 end
-function W.delete_form(key) W.sql_write('DELETE FROM start_forms WHERE key = ?', {key}) end
 -- put_run_forms writes the start form of each run with an ID from first to last (numbers), as
 -- its admission does: the run's request, a new revision each, and at. One statement for all.
 function W.put_run_forms(first, last, at)
