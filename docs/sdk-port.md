@@ -145,8 +145,9 @@ effect or a held revision needs it, and each guard that stays is listed here wit
   same transaction: an INSERT with the first chunk, then `value = value || ?`. A chunk is cut on a
   UTF-8 boundary. The chunk budget (60 KiB) is internal; the record limits do not change.
   - The largest row: a store record is at most one 64 KiB control message as JSON, and a '"' or a
-    "\" grows the most as a parameter (2 bytes to 4). So the largest row needs 3 chunks, in one
-    transaction within the hub's 10 s (tested: 31 000 '"', 2 appends).
+    "\" grows the most as a parameter (2 bytes to 4). So with ordinary metadata (a key of a few
+    hundred bytes) the largest row needs 3 chunks, in one transaction within the hub's 10 s
+    (tested: 31 000 '"', 2 appends). Metadata that leaves little room gives more, smaller chunks.
   - A row whose key and other parameters alone are over the budget is refused (`too_large`). The
     import stops before that row: its cursor does not pass it, and `import` is not set, so the
     plugin does not serve. The hub starts the plugin again, and the import tries again (tested
@@ -156,10 +157,13 @@ effect or a held revision needs it, and each guard that stays is listed here wit
   with its cursor in one short transaction. An error stops the start, and the hub starts the plugin
   again; the import continues at the cursor. A record that is written again is the same row. The
   store records stay in the store; they are not a rollback path (section 3).
-- A call during the import waits until the import ends (observed: the plugin served no agent
-  call before the import's last write). The hub gives a forwarded call 10 s, so a call can time
-  out during a long import (6000 records). Rex can still deliver it after the import (observed in
-  one lab run, not in another). Either way, a retry with the same key answers as one save.
+- A call during the import waits until the import ends. Tested with 200 records: the test checks
+  that the import has not ended, sends the call, and reads the complete call record (no call
+  dropped): the agent's dispatch (`hub.identify`) comes after the import's last write. The hub
+  gives a forwarded call 10 s, so a call can time out during a long import (tested with 6000
+  records; that test does not check the order). Rex can still deliver it after the import
+  (observed in one lab run, not in another). Either way, a retry with the same key answers as one
+  save.
 - Tests: `tests/import.lua` (every record shape with its exact JSON text and rev, string values,
   the operations, the revision floor, a failed append between two chunks, a failed commit, a lost
   commit reply, the largest row, a key over the budget, a call during the import),
