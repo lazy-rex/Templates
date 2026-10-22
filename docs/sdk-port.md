@@ -175,10 +175,10 @@ effect or a held revision needs it, and each guard that stays is listed here wit
   replay). The test helpers `W.twrite` and `W.trow` write and read template rows as another writer
   would.
 - Tested: LazyRex hub/sql-lab f413b36 (the launcher, hub.sql, the store fence and
-  `hub.admin.sql_return`) with SDK origin/sdk/lua cf811b5 at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
-  On this hub, a render has no render token, and SDK cf811b5 then reads `app.db.each` in a
-  transaction: a test `sql_write` during a render gets `busy`. The suite passes with a local SDK change that marks
-  each render frame (sent to the hub lead as an SDK defect; untested with an SDK fix).
+  `hub.admin.sql_return`) with SDK origin/sdk/lua eb9654d at `sdk/lua`; Rex 0.0.1792158932-g88fd41.
+  All 24 files pass (Templates 8dc229b). SDK eb9654d: a render reads without a transaction, and a
+  write in a render fails. No Templates render writes (the reviewer checked the render paths; the suite
+  passes with this refusal).
 
 ## 6. SDK gaps (sent 2026-10-22)
 
