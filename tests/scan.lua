@@ -11,10 +11,10 @@ local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local function big_runs(first, last, pad)
   local root = W.real(W.HOME)
   for i = first, last do
-    W.twrite({{key = 'run/' .. i, value = {id = tostring(i), status = 'open', next_tab = 2, root = root,
+    W.put_runs({{id = tostring(i), status = 'open', next_tab = 2, root = root,
       tabs = {{key = 'templates/' .. i .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
       request = {key = 'big' .. i, root = root, new_session_name = 'big' .. i, template = {v = 1, name = 'big' .. i, tabs = {}}},
-      results = {}, session_key = 'templates/' .. i .. '/session', pad = string.rep('<', pad)}}})
+      results = {}, session_key = 'templates/' .. i .. '/session', pad = string.rep('<', pad)}})
   end
 end
 -- once checks that list has every ID from first to last exactly once (other IDs can be there too).
@@ -61,8 +61,8 @@ test('every template is listed once over more than 1 MiB of templates', function
   local s = W.workspace()
   for i = 1, 18 do
     local name = string.format('big-template-%02d', i)
-    W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user',
-      tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}, pad = string.rep('<', 10000)}}})
+    W.put_template(W.hex(name), {v = 1, name = name, saved_by = 'user',
+      tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}, pad = string.rep('<', 10000)})
   end
   local names = {}
   for _, t in ipairs(alice:call('templates.list', {}).templates) do names[#names + 1] = t.name:match('^big%-template%-(%d+)$') end
@@ -81,13 +81,13 @@ end)
 test('a queued run behind more than 1 MiB of runs resumes after a hub restart', function()
   local root = W.real(W.HOME)
   big_runs(2001, 2018, 10000)
-  W.twrite({{key = 'run/2019', value = {id = '2019', status = 'queued', next_tab = 1, root = root,
+  W.put_runs({{id = '2019', status = 'queued', next_tab = 1, root = root,
     tabs = {{key = 'templates/2019/tab/1', title = 'resumed', layout = {shell = true, cwd = root}}},
     request = {key = 'resume-2019', root = root, new_session_name = 'resumed', template = {v = 1, name = 'resumed', tabs = {}}},
-    results = {}, session_key = 'templates/2019/session'}}})
+    results = {}, session_key = 'templates/2019/session'}})
   hub:restart()
   local run = wait('run 2019 open', function()
-    local r = W.rec('run/2019').value
+    local r = W.run('2019').value
     return r and r.status == 'open' and r or nil
   end, 30)
   local windows = rex.call('session.view', {session_id = run.session_id}).windows

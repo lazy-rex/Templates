@@ -31,8 +31,8 @@ test('a scan page that is too large is asked for again with a smaller limit; the
   W.restart()
   W.imported()
   for n = 1, 3 do expect(fault_fired(faults[n])).to_be(true) end
-  expect(W.trow('template/' .. W.hex('se-small')).value.name).to_be('se-small')
-  expect(W.rec('run/7001').value.status).to_be('open')
+  expect(W.template(W.hex('se-small')).value.name).to_be('se-small')
+  expect(W.run('7001').value.status).to_be('open')
 end)
 
 test('another scan error stops the start; the next start completes the import', function()
@@ -44,6 +44,6 @@ test('another scan error stops the start; the next start completes the import', 
   W.restart()
   W.imported()
   expect(fault_fired(f)).to_be(true)
-  expect(W.trow('template/' .. W.hex('se-fail')).value.name).to_be('se-fail')
-  expect(W.rec('run/7002').value.status).to_be('open')
+  expect(W.template(W.hex('se-fail')).value.name).to_be('se-fail')
+  expect(W.run('7002').value.status).to_be('open')
 end)

@@ -103,7 +103,7 @@ test('lab 5 a start into this session gives the first new tab the focus; no swit
   for _, w in ipairs(v.windows) do if w.label == 'code' then code = w end end
   expect(v.active_window_id).to_be(code.window_id)
   expect(code.focused_block_id).to_be(tiled(code).split.before.block_id)
-  expect(W.switch_record('lab5-start')).to_be(nil)
+  expect(W.switch(W.start_key('lab5-start'))).to_be(nil)
 end)
 
 test('a nested layout starts with its ratios, its leaf order and each leaf\'s directory', function()

@@ -24,10 +24,10 @@ local SOURCE = {
 -- the workers of its panes (block -> {profile, title}).
 local function started(alice, name, tabs, root)
   S.n = S.n + 1
-  W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = tabs}}})
+  W.put_template(W.hex(name), {v = 1, name = name, saved_by = 'user', tabs = tabs})
   local r = alice:call('templates.start', {template = name, root = root, key = name .. '-start-' .. S.n})
   W.wait_run(alice, r.run_id, 'open')
-  local s = W.rec('run/' .. r.run_id).value.session_id
+  local s = W.run(r.run_id).value.session_id
   local all, workers, by_title = {}, {}, {}
   for _, x in ipairs(alice:hub('hub.workers', {}).workers) do if x.block_id then all[x.block_id] = x end end
   for _, b in ipairs(W.blocks(s)) do
@@ -72,7 +72,7 @@ test('a round trip keeps requested titles only; a default and a generated agent 
   table.sort(requested)
   expect(requested).to_equal({'API', 'Logs', 'Server'})
   alice:call('templates.save', {name = 'tt-saved', root = root, session_id = s, key = 'tt-saved'})
-  local saved = W.template('tt-saved')
+  local saved = W.template(W.hex('tt-saved')).value
   expect(labels(saved)).to_equal({'API', false, 'Server', 'Logs', false})
   -- A second start: the requested titles come back; the untitled server pane gets the profile's
   -- current name, and the agent pane a new generated name.
@@ -105,13 +105,13 @@ test('a busy shell spawn keeps its title only with an explicit Shell; another la
   expect(capture_of(alice, s)[logs].requested_title).to_be('Logs')
   -- An explicit Shell keeps it; the API pane keeps its profile.
   alice:call('templates.save', {name = 'tt-busy-1', root = root, session_id = s, panes = {[logs] = 'shell'}, key = 'tt-busy-1'})
-  expect(labels(W.template('tt-busy-1'))).to_equal({'Logs', 'API'})
+  expect(labels(W.template(W.hex('tt-busy-1')).value)).to_equal({'Logs', 'API'})
   -- Another profile for each pane: no label.
   alice:call('templates.save', {name = 'tt-busy-2', root = root, session_id = s, panes = {[logs] = 'profile:watcher', [api] = 'profile:watcher'}, key = 'tt-busy-2'})
-  expect(labels(W.template('tt-busy-2'))).to_equal({false, false})
+  expect(labels(W.template(W.hex('tt-busy-2')).value)).to_equal({false, false})
   -- A skipped pane has no leaf.
   alice:call('templates.save', {name = 'tt-busy-3', root = root, session_id = s, panes = {[logs] = 'skip'}, key = 'tt-busy-3'})
-  expect(labels(W.template('tt-busy-3'))).to_equal({'API'})
+  expect(labels(W.template(W.hex('tt-busy-3')).value)).to_equal({'API'})
 end)
 
 test('the Save form shows the title of every spawned pane, also a shell', function()

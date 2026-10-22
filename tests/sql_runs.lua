@@ -5,7 +5,6 @@
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local function part(s) return #s .. ':' .. s end
-local function counter() local r = sql("SELECT v FROM meta WHERE k = 'run-counter'")[1]; return r and r.v end
 local function rows(sql_text, params) return #sql(sql_text, params) end
 local function saved(a, name)
   local s, root = W.workspace()
@@ -17,17 +16,17 @@ end
 test('admission: a lost commit reply replays the same run; the counter moves once', function()
   local alice = agent('alice')
   local root = saved(alice, 'sr-lost')
-  local before = counter()
+  local before = W.counter()
   local key = 'start/agent/' .. part('alice') .. part('sr-lost')
   local inj = inject({match = {sql_commit_writes = 'runs'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
   local args = {template = 'sr-lost', root = root, key = 'sr-lost'}
   expect_error(function() alice:call('templates.start', args) end, 'unavailable')
   expect(injection(inj).consumed).to_be(1)
-  local id = W.rec('run-key/' .. key).value.id
+  local id = W.run_key(key).run_id
   expect(id).to_be(tostring((tonumber(before) or 0) + 1))
   local r = alice:call('templates.start', args)
   expect(r.run_id).to_be(id)
-  expect(counter()).to_be(id)
+  expect(W.counter()).to_be(id)
   expect(rows("SELECT id FROM runs WHERE value ->> '$.request.key' = ?", {key})).to_be(1)
   expect(rows('SELECT key FROM start_forms WHERE key = ?', {key})).to_be(1)
   W.wait_run(alice, id, 'open')
@@ -39,14 +38,14 @@ end)
 test('admission: a refused commit leaves no form, key, counter or run; a retry admits once', function()
   local alice = agent('alice')
   local root = saved(alice, 'sr-refused')
-  local before = counter()
+  local before = W.counter()
   local key = 'start/agent/' .. part('alice') .. part('sr-refused')
   local inj = inject({match = {sql_commit_writes = 'runs'}, fail = 'transaction ended by the test', fail_code = 'tx_expired'})
   local args = {template = 'sr-refused', root = root, key = 'sr-refused'}
   expect_error(function() alice:call('templates.start', args) end, 'tx_expired')
   expect(injection(inj).consumed).to_be(1)
-  expect(counter()).to_be(before)
-  expect(W.rec('run-key/' .. key).value).to_be(nil)
+  expect(W.counter()).to_be(before)
+  expect(W.run_key(key)).to_be(nil)
   expect(rows('SELECT key FROM start_forms WHERE key = ?', {key})).to_be(0)
   expect(rows("SELECT id FROM runs WHERE value ->> '$.request.key' = ?", {key})).to_be(0)
   local r = alice:call('templates.start', args)
@@ -60,17 +59,18 @@ test('dismiss: a lost commit reply replays its saved reply; one operation, one d
   local alice = agent('alice')
   local id = '9001'
   local key = 'start/agent/' .. part('alice') .. part('sr-dismiss')
-  W.twrite({{key = 'run/' .. id, value = {id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
+  W.put_runs({{id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
     session_key = 'templates/' .. id .. '/session', request = {key = key, by = 'alice', root = '/', new_session_name = 'sr',
-    template = {v = 1, name = 'sr', tabs = {}}}}}, {key = 'run-key/' .. key, value = {id = id}}})
+    template = {v = 1, name = 'sr', tabs = {}}}}})
+  W.put_run_key(key, {run_id = id})
   local inj = inject({match = {sql_commit_writes = 'ops'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
   local args = {run_id = id, key = 'sr-dismiss'}
   expect_error(function() alice:call('templates.dismiss', args) end, 'unavailable')
   expect(injection(inj).consumed).to_be(1)
-  expect(W.rec('run/' .. id).value.status).to_be('dismissed')
+  expect(W.run(id).value.status).to_be('dismissed')
   expect(alice:call('templates.dismiss', args)).to_equal({run_id = id, status = 'dismissed'})
   expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part('alice') .. part('sr-dismiss')})).to_be(1)
-  expect(W.rec('run/' .. id).value.dismissed_from).to_be('authorizing')
+  expect(W.run(id).value.dismissed_from).to_be('authorizing')
 end)
 
 -- A run over FRAME_MAX as a parameter: the root holds 3 directories of 240 "<", and the run holds
@@ -86,14 +86,14 @@ test('a run over the frame limit as a parameter opens; each save is a chunked up
   local function leaf() return {launch = {shell = true}, dir = '.'} end
   local layout = leaf()
   for _ = 1, 4 do layout = {direction = 'horizontal', ratio = 0.5, before = leaf(), after = layout} end
-  W.twrite({{key = 'template/' .. W.hex('sr-chunk'), value = {v = 1, name = 'sr-chunk', saved_by = 'alice',
-    tabs = {{title = 'chunk', layout = layout}}}}})
+  W.put_template(W.hex('sr-chunk'), {v = 1, name = 'sr-chunk', saved_by = 'alice',
+    tabs = {{title = 'chunk', layout = layout}}})
   local r = alice:call('templates.start', {template = 'sr-chunk', root = root, key = 'sr-chunk'})
   W.wait_run(alice, r.run_id, 'open')
-  local run = W.rec('run/' .. r.run_id)
+  local run = W.run(r.run_id)
   expect(#rex.json.encode(rex.json.encode(run.value)) > 60 * 1024).to_be(true)
   expect(#rex.json.encode(run.value) <= 61 * 1024).to_be(true)
-  expect(tonumber(run.rev) > 2).to_be(true)
+  expect(run.ver > 2).to_be(true)
   expect(run.value.tabs[1].request.layout ~= nil).to_be(true)
 end)
 
@@ -104,9 +104,10 @@ end)
 -- checks that the fault failed that statement.
 local function big_authorizing(id, name)
   local key = 'start/agent/' .. part('alice') .. part(name)
-  W.twrite({{key = 'run/' .. id, value = {id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
+  W.put_runs({{id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
     pad = string.rep('<', 9000), session_key = 'templates/' .. id .. '/session', request = {key = key, by = 'alice', root = '/',
-    new_session_name = 'sr', template = {v = 1, name = 'sr', tabs = {}}}}}, {key = 'run-key/' .. key, value = {id = id}}})
+    new_session_name = 'sr', template = {v = 1, name = 'sr', tabs = {}}}}})
+  W.put_run_key(key, {run_id = id})
 end
 local function run_row(id) return sql('SELECT ver, status, value FROM runs WHERE id = ?', {id})[1] end
 local function is_append(c) return c.args.sql:match('^UPDATE runs SET value = value || %?') ~= nil end

@@ -24,8 +24,8 @@ end)
 local HUGE = 'h' .. string.rep('<', 4200)
 test('no template option fits: the Start form has no submit and says to use templates.start', function()
   local s = W.workspace()
-  W.twrite({{key = 'template/' .. W.hex(HUGE), value = {v = 1, name = HUGE, saved_by = 'user',
-    tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  W.put_template(W.hex(HUGE), {v = 1, name = HUGE, saved_by = 'user',
+    tabs = {{title = 't', layout = {launch = {shell = true}, dir = '.'}}}})
   local tree = W.open('start_session', '/forms/start', s):render()
   expect(size(tree) <= BUDGET).to_be(true)
   expect(node(tree, 'start_session')).to_be(nil)
@@ -50,11 +50,11 @@ test('a switch notice over the budget is left out, and its start is counted', fu
   local s = W.workspace()
   local root = W.real(W.HOME)
   local name = string.rep('<', 9000)
-  W.twrite({{key = 'run/7001', value = {id = '7001', status = 'open', next_tab = 2, root = root,
+  W.put_runs({{id = '7001', status = 'open', next_tab = 2, root = root,
     tabs = {{key = 'templates/7001/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
     request = {key = 'huge-notice', root = root, new_session_name = 'n', template = {v = 1, name = name, tabs = {}}},
-    results = {}, session_key = 'templates/7001/session'}}})
-  W.twrite({{key = 'switch/' .. W.hex('huge-notice'), value = {state = 'refused', code = 'no_app'}}})
+    results = {}, session_key = 'templates/7001/session'}})
+  W.put_switch('huge-notice', {state = 'refused', code = 'no_app'})
   local panel = W.panel(s):render()
   expect(size(panel) <= BUDGET).to_be(true)
   expect(node(panel, 'switch')).to_be(nil)
@@ -68,10 +68,10 @@ test('a stuck start over the budget is counted, and a smaller one is shown', fun
   local s = W.workspace()
   local root = W.real(W.HOME)
   for _, r in ipairs({{id = '7003', err = string.rep('<', 9000)}, {id = '7002', err = 'small'}}) do
-    W.twrite({{key = 'run/' .. r.id, value = {id = r.id, status = 'pending', next_tab = 1, root = root,
+    W.put_runs({{id = r.id, status = 'pending', next_tab = 1, root = root,
       tabs = {{key = 'templates/' .. r.id .. '/tab/1', title = 'x', layout = {shell = true, cwd = root}}},
       request = {key = 'stuck' .. r.id, root = root, session_id = 'session:none', template = {v = 1, name = 's' .. r.id, tabs = {}}},
-      results = {}, session_key = 'templates/' .. r.id .. '/session', error = r.err}}})
+      results = {}, session_key = 'templates/' .. r.id .. '/session', error = r.err}})
   end
   local panel = W.panel(s):render()
   expect(size(panel) <= BUDGET).to_be(true)

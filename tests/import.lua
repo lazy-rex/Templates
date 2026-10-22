@@ -49,7 +49,7 @@ test('the import copies every template record exactly, the save and delete opera
   local s, root = W.workspace()
   W.capture(alice, s)
   alice:call('templates.save', {name = 'imp-new', root = root, session_id = s, key = 'imp-new'})
-  expect(tonumber(W.trow('template/' .. W.hex('imp-new')).rev) > floor).to_be(true)
+  expect(tonumber(W.template(W.hex('imp-new')).rev) > floor).to_be(true)
 end)
 
 -- The reviewer's probe (773cd80 review): a value that is a string is a JSON string in its row, also
@@ -72,7 +72,8 @@ test('a string value and a string operation result import as JSON strings', func
   for _, t in ipairs(agent('alice'):call('templates.list', {}).templates) do names[t.name] = true end
   expect(names['imp-str'] or names['imp-str-json'] or false).to_be(false)
   write({{key = plain, delete = true}, {key = looks, delete = true}})
-  W.twrite({{key = plain, delete = true}, {key = looks, delete = true}})
+  W.delete_template(W.hex('imp-str'))
+  W.delete_template(W.hex('imp-str-json'))
 end)
 
 test('a failed append between two chunks commits nothing; the next start imports the record whole', function()
@@ -245,20 +246,19 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
   slice2_done()
   -- Runs: exact value, exact 32-digit ID, status = value.status. Both runs are final (open,
   -- dismissed), so the resumed engine does not change them before the comparison.
-  expect(W.rec('run/' .. BIG).value).to_equal(store('run/' .. BIG).value)
-  expect(W.rec('run/77').value).to_equal(store('run/77').value)
+  expect(W.run(BIG).value).to_equal(store('run/' .. BIG).value)
+  expect(W.run('77').value).to_equal(store('run/77').value)
   expect(sql("SELECT count(*) AS n FROM runs WHERE status IS NOT value ->> '$.status'")[1].n).to_be(0)
   expect(meta_v('run-counter')).to_be(BIG)
   -- Run keys: live, marker with form_rev, legacy marker (NULL form_rev).
-  expect(W.rec('run-key/' .. K1).value).to_equal({id = BIG})
-  expect(W.rec('run-key/' .. K2).value).to_equal({id = '5', expired_at = 1000, form_rev = form_rev})
-  expect(W.rec('run-key/' .. K3).value).to_equal({id = '6', expired_at = 1001})
+  expect(W.run_key(K1)).to_equal({run_id = BIG})
+  expect(W.run_key(K2)).to_equal({run_id = '5', expired_at = 1000, form_rev = form_rev})
+  expect(W.run_key(K3)).to_equal({run_id = '6', expired_at = 1001})
   -- Start forms: the store rev, and at NULL in a legacy form.
-  local f2, f4 = W.rec('start-form/' .. hex(K2)), W.rec('start-form/' .. hex(K4))
-  expect(f2.rev).to_be(form_rev)
-  expect(f2.value).to_equal({fingerprint = 'fp-2', request = {key = K2}, at = 123})
-  expect(f4.value).to_equal({fingerprint = 'fp-4', request = {key = K4}})
-  expect(W.rec('switch/' .. hex(K1)).value).to_equal({state = 'refused', code = 'timeout', message = 'm'})
+  local f2, f4 = W.form(K2), W.form(K4)
+  expect(f2).to_equal({rev = form_rev, fingerprint = 'fp-2', request = {key = K2}, at = 123})
+  expect(f4).to_equal({rev = f4.rev, fingerprint = 'fp-4', request = {key = K4}})
+  expect(W.switch(K1)).to_equal({state = 'refused', code = 'timeout', message = 'm'})
   -- The dismiss and retry operations, although the slice 1 operations step was done.
   local ops = {}
   for _, o in ipairs(sql("SELECT key FROM ops WHERE (key LIKE 'dismiss/%' OR key LIKE 'retry/%') AND key LIKE '%i2-%' ORDER BY key")) do ops[#ops + 1] = o.key end
@@ -271,7 +271,9 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
     {key = 'run/' .. BIG, delete = true}, {key = 'run/77', delete = true}, {key = 'run-counter', delete = true},
     {key = 'run-key/' .. K1, delete = true}, {key = 'run-key/' .. K2, delete = true}, {key = 'run-key/' .. K3, delete = true},
     {key = 'switch/' .. hex(K1), delete = true}})
-  W.twrite({{key = 'run/' .. BIG, delete = true}, {key = 'run/77', delete = true}, {key = 'run-counter', delete = true}})
+  W.delete_run(BIG)
+  W.delete_run('77')
+  W.set_counter(nil)
 end)
 
 -- A record of a shape that Templates did not write refuses the import: the start fails, the
@@ -292,9 +294,9 @@ test('an unsupported start record refuses the import without moving its cursor; 
   expect(#sql("SELECT id FROM runs WHERE id IN ('88', '89')")).to_be(0)
   write({{key = 'run/88', delete = true}})
   imported()
-  expect(W.rec('run/89').value.status).to_be('open')
+  expect(W.run('89').value.status).to_be('open')
   write({{key = 'run/89', delete = true}})
-  W.twrite({{key = 'run/89', delete = true}})
+  W.delete_run('89')
 end)
 
 -- A call that times out during a long import: 6000 records take longer than the hub's 10 s for a
@@ -319,9 +321,10 @@ test('a call that times out during a long import answers as one save on its retr
   -- Rex can still deliver the timed-out call after the import (observed in one lab run on Rex
   -- 0.0.1792158932-g88fd41, LazyRex hub/sql-lab f413b36; another run did not show it by the time of
   -- this read). Either way the retry answers as one save: it replays a save that ran, or saves.
-  local rev = W.trow('template/' .. W.hex('q-save')).rev
+  local before = W.template(W.hex('q-save'))
+  local rev = before and before.rev
   expect(alice:call('templates.save', args)).to_equal({name = 'q-save'})
-  local after = W.trow('template/' .. W.hex('q-save')).rev
+  local after = W.template(W.hex('q-save')).rev
   expect(after ~= nil).to_be(true)
   if rev then expect(after).to_be(rev) end
   expect(#sql('SELECT key FROM ops WHERE key LIKE ?', {'save/agent/%q-save'})).to_be(1)

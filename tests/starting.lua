@@ -8,11 +8,11 @@
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
 -- waiting opens a Start form for a one-tab template, holds the run's updates, and submits. It
--- returns the form, the operation key, the hold and the switch record key once the form shows
+-- returns the form, the operation key, the hold and the start key (of its switches row) once the form shows
 -- "Starting…".
 local function waiting(name, op_key)
   local s, root = W.workspace()
-  W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, tabs = {{title = 'shell', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  W.put_template(W.hex(name), {v = 1, name = name, tabs = {{title = 'shell', layout = {launch = {shell = true}, dir = '.'}}}})
   local form = W.open('start_session', '/forms/start', s)
   local values = W.form_input(form:render(), 'start_session')
   values.template, values.root, values.session_id = name, root, '@new'
@@ -20,7 +20,7 @@ local function waiting(name, op_key)
   local hold = inject({match = {sql_commit_writes = 'runs'}, skip = 1, fail = 'held by the test', times = 'always'})
   local _, key = form:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = op_key})
   wait('the waiting form', function() return node(form:render(), 'starting') end, 10)
-  return form, key, hold, 'switch/' .. W.hex(W.rec('run/' .. id).value.request.key)
+  return form, key, hold, W.run(id).value.request.key
 end
 
 -- The reviewer's probe (item 8 review): a definite error ends the operation, and the form no
@@ -54,7 +54,7 @@ test('a poll that fails with a transient error keeps Starting; the operation the
   cancel_injection(hold)
   a:close()
   expect(op.status).to_be('succeeded')
-  expect(W.rec(switch).value.state).to_be('refused')
+  expect(W.switch(switch).state).to_be('refused')
   -- The success result opens the panel in the form's place (its panel effect), so the form view
   -- is gone; its waiting state ended with the result (start_poll).
   expect(op.result.panel.route).to_be('/panels/templates')

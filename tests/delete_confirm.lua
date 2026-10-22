@@ -10,7 +10,7 @@ local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local BUDGET = 48 * 1024
 local function size(v) return #rex.json.encode(v) end
 local function layout(title) return {{title = title, layout = {launch = {shell = true}, dir = '.'}}} end
-local function put(key_name, value) W.twrite({{key = 'template/' .. W.hex(key_name), value = value}}) end
+local function put(key_name, value) W.put_template(W.hex(key_name), value) end
 local function tpl(name, title) return {v = 1, name = name, saved_by = 'user', tabs = layout(title or 'one')} end
 local function close_form(s)
   for _, b in ipairs(W.blocks(s)) do
@@ -28,7 +28,7 @@ end
 local function open_confirm(s, hx, key)
   local menu = open_menu(s, hx, key .. '-open')
   menu:render()
-  local rev = W.trow('template/' .. hx).rev
+  local rev = W.template(hx).rev
   expect(menu:action('template_menu', 'delete', {item_id = 'delete'}, key .. '-menu').status).to_be('succeeded')
   local confirm = user:view('/forms/delete/' .. hx .. '/' .. rev, nil, s)
   return confirm, rev
@@ -43,7 +43,7 @@ test('the panel row no longer deletes: the old delete action is refused; the row
   local tree0 = p:render()
   -- The defect: before the fix, this one action (one Enter on the row) deleted the template.
   local old = p:action('templates', 'delete', {item_id = 'pd-old'}, 'pd-old-delete')
-  expect(W.trow('template/' .. hx).value).not_to_be(nil)
+  expect(W.template(hx).value).not_to_be(nil)
   expect(old.status).to_be('failed')
   local row = W.find(node(tree0, 'templates').items, 'id', hx)
   expect(row.action.name).to_be('open')
@@ -68,7 +68,7 @@ test('Cancel in the confirmation keeps the template; the panel comes back', func
   expect(node(tree, 'cancel').action.name).to_be('$cancel')
   close_form(s)
   expect(user:view('/panels/templates', nil, s):render().title).to_be('Templates')
-  expect(W.trow('template/' .. hx).rev).to_be(rev)
+  expect(W.template(hx).rev).to_be(rev)
 end)
 
 test('Delete in the confirmation deletes; the form closes; the same operation key replays', function()
@@ -79,7 +79,7 @@ test('Delete in the confirmation deletes; the form closes; the same operation ke
   local op = submit(confirm, 'pd-yes-submit')
   expect(op.status).to_be('succeeded')
   expect(op.result).to_equal({close_form = true})
-  expect(W.trow('template/' .. hx).value).to_be(nil)
+  expect(W.template(hx)).to_be(nil)
   expect(user:view('/panels/templates', nil, s):render().title).to_be('Templates')
   expect(operation('pd-yes-submit').result).to_equal({close_form = true})
 end)
@@ -91,12 +91,12 @@ test('a template replaced before the submit is kept: conflict; the confirmation 
   local confirm = open_confirm(s, hx, 'pd-swap')
   confirm:render()
   -- Deleted and saved again under the same name (a direct write: no render of the open views).
-  W.twrite({{key = 'template/' .. hx, delete = true}})
+  W.delete_template(hx)
   put('pd-swap', tpl('pd-swap', 'new'))
   local op = submit(confirm, 'pd-swap-submit')
   expect(op.status).to_be('failed')
   expect(op.error.code).to_be('conflict')
-  expect(W.trow('template/' .. hx).value.tabs[1].title).to_be('new')
+  expect(W.template(hx).value.tabs[1].title).to_be('new')
   local tree = confirm:render()
   expect(node(tree, 'confirm')).to_be(nil)
   expect(node(tree, 'changed').text).to_be('The template changed or was deleted after you chose Delete.')
@@ -115,7 +115,7 @@ test('a template replaced after the Delete choice is kept: conflict', function()
   local op = submit(confirm, 'pd-race-submit')
   expect(op.status).to_be('failed')
   expect(op.error.code).to_be('conflict')
-  expect(W.trow('template/' .. hx).value.tabs[1].title).to_be('new')
+  expect(W.template(hx).value.tabs[1].title).to_be('new')
   close_form(s)
 end)
 
@@ -132,7 +132,7 @@ test('a lost commit reply: the operation runs again and answers from the saved r
   expect(injection(inj).consumed).to_be(1)
   expect(op.status).to_be('succeeded')
   expect(op.result).to_equal({close_form = true})
-  expect(W.trow('template/' .. hx).value).to_be(nil)
+  expect(W.template(hx)).to_be(nil)
 end)
 
 test('the same operation key on the route of another template is operation_conflict', function()
@@ -142,7 +142,7 @@ test('the same operation key on the route of another template is operation_confl
   expect(submit(open_confirm(s, W.hex('pd-k1'), 'pd-k1'), 'pd-k-submit').status).to_be('succeeded')
   local second = open_confirm(s, W.hex('pd-k2'), 'pd-k2')
   expect_error(function() second:action('confirm', 'submit', {values = {}}, 'pd-k-submit') end, 'operation_conflict')
-  expect(W.trow('template/' .. W.hex('pd-k2')).value).not_to_be(nil)
+  expect(W.template(W.hex('pd-k2')).value).not_to_be(nil)
   close_form(s)
 end)
 
@@ -163,14 +163,14 @@ test('Start session… starts the template of the row\'s key, not of its value.n
   values.root, values.session_id = root, '@new'
   local op = form:action('start_session', 'submit', {values = values}, 'pd-a-submit')
   expect(op.status).to_be('succeeded')
-  expect(W.rec('run/' .. op.result.run_id).value.request.template.tabs[1].title).to_be('a-tab')
+  expect(W.run(op.result.run_id).value.request.template.tabs[1].title).to_be('a-tab')
 end)
 
 -- A key whose name is not valid UTF-8 cannot be an option (its JSON round trip changes it). The
 -- Start form says so and has no submit; Delete names the record by its hex and deletes it.
 test('a foreign key that is not UTF-8: no Start submit; Delete deletes that record', function()
   local s = W.workspace()
-  W.twrite({{key = 'template/ff', value = {v = 1, name = 'foreign', tabs = layout('f')}}})
+  W.put_template('ff', {v = 1, name = 'foreign', tabs = layout('f')})
   local p = W.panel(s)
   expect(W.find(node(p:render(), 'templates').items, 'id', 'ff').label).to_be('foreign')
   local menu = open_menu(s, 'ff', 'pd-ff-first')
@@ -182,17 +182,15 @@ test('a foreign key that is not UTF-8: no Start submit; Delete deletes that reco
   close_form(s)
   local confirm = open_confirm(s, 'ff', 'pd-ff')
   expect(submit(confirm, 'pd-ff-submit').status).to_be('succeeded')
-  expect(W.trow('template/ff').value).to_be(nil)
+  expect(W.template('ff')).to_be(nil)
 end)
 
 -- The selected template stays selected when the other options do not all fit.
 test('a selected template late in a large list stays selected; the others are cut', function()
   local s = W.workspace()
-  local ops = {}
   for i = 1, 100 do
     local name = string.format('pd-big-%03d-', i) .. string.rep('x', 390)
-    ops[#ops + 1] = {key = 'template/' .. W.hex(name), value = tpl(name)}
-    if #ops == 20 then W.twrite(ops); ops = {} end
+    W.put_template(W.hex(name), tpl(name))
   end
   local last = 'pd-big-100-' .. string.rep('x', 390)
   local hx = W.hex(last)
@@ -206,11 +204,7 @@ test('a selected template late in a large list stays selected; the others are cu
   expect(field.options[1].value).to_be(last)
   expect(node(tree, 'more_options').text).to_match('more templates')
   close_form(s)
-  local del = {}
-  for i = 1, 100 do
-    del[#del + 1] = {key = 'template/' .. W.hex(string.format('pd-big-%03d-', i) .. string.rep('x', 390)), delete = true}
-    if #del == 20 then W.twrite(del); del = {} end
-  end
+  for i = 1, 100 do W.delete_template(W.hex(string.format('pd-big-%03d-', i) .. string.rep('x', 390))) end
 end)
 
 test('a template removed before its Start form or its menu opens: the form says so, with no submit', function()
@@ -219,7 +213,7 @@ test('a template removed before its Start form or its menu opens: the form says 
   local hx = W.hex('pd-gone')
   local menu = open_menu(s, hx, 'pd-gone-open')
   menu:render()
-  W.twrite({{key = 'template/' .. hx, delete = true}})
+  W.delete_template(hx)
   local missing = menu:render()
   expect(node(missing, 'missing').text).to_be('This template no longer exists.')
   expect(node(missing, 'template_menu')).to_be(nil)
@@ -227,7 +221,7 @@ test('a template removed before its Start form or its menu opens: the form says 
   put('pd-gone', tpl('pd-gone'))
   menu = open_menu(s, hx, 'pd-gone-open-2')
   menu:render()
-  W.twrite({{key = 'template/' .. hx, delete = true}})
+  W.delete_template(hx)
   menu:action('template_menu', 'start', {item_id = 'start'}, 'pd-gone-start')
   local tree = user:view('/forms/start/' .. hx, nil, s):render()
   expect(node(tree, 'start_session')).to_be(nil)

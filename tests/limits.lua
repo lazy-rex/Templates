@@ -40,7 +40,7 @@ local function try(tabs, leaves, n)
   local root = W.real(W.HOME)
   local name = 'big-' .. tabs .. '-' .. leaves .. '-' .. n
   local t = tpl(name, tabs, leaves, n)
-  W.twrite({{key = 'template/' .. W.hex(name), value = t}})
+  W.put_template(W.hex(name), t)
   -- The user's start, from the Start form, into a new session.
   local s = W.workspace()
   local form = W.open('start_session', '/forms/start', s)
@@ -50,12 +50,13 @@ local function try(tabs, leaves, n)
   local op = form:action('start_session', 'submit', {values = values}, 'ui-' .. name)
   local ui_status = op.status == 'succeeded' and settled(op.result.run_id) or ('admission ' .. op.status)
   local ui_ok = ui_status == 'open'
-  local run = W.rec('run/' .. ui_id).value
+  local row = W.run(ui_id)
+  local run = row and row.value
   -- The agent's start of the same template.
   local ok, r = pcall(S.alice.call, S.alice, 'templates.start', {template = name, root = root, key = 'agent-' .. name})
   local agent_status = ok and settled(r.run_id) or 'refused'
   local agent_ok = agent_status == 'open'
-  local agent_run = ok and W.rec('run/' .. r.run_id).value or nil
+  local agent_run = ok and W.run(r.run_id).value or nil
   print(string.format('limits: %d tab(s) x %d pane(s) x %d B: template %d B, run %s B; user %s, agent %s%s', tabs, leaves, n, size(t),
     run and tostring(size(run)) or '-', ui_status, agent_status,
     ok and '' or (' (' .. tostring(type(r) == 'table' and r.message or r) .. ')')))
@@ -86,8 +87,8 @@ end)
 -- the 64 KiB bound. Admission must count it at its encoded size and refuse it on both paths.
 -- amp_template writes a one-pane template with that arg, named name (the new session's name too).
 local function amp_template(name)
-  W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'user', tabs = {{title = 'one',
-    layout = {launch = {profile = 'server', args = {port = string.rep('&', 4000)}}, dir = '.'}}}}}})
+  W.put_template(W.hex(name), {v = 1, name = name, saved_by = 'user', tabs = {{title = 'one',
+    layout = {launch = {profile = 'server', args = {port = string.rep('&', 4000)}}, dir = '.'}}}})
 end
 local function no_session(label)
   for _, s in ipairs(rex.call('session.list', {}).sessions) do
@@ -124,8 +125,8 @@ end)
 -- start replays with it, and another start with it conflicts.
 test('a key of 200 "<" still starts and replays', function()
   local a = agent('alice')
-  W.twrite({{key = 'template/' .. W.hex('lt-key'), value = {v = 1, name = 'lt-key', saved_by = 'alice',
-    tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  W.put_template(W.hex('lt-key'), {v = 1, name = 'lt-key', saved_by = 'alice',
+    tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
   local key, root = string.rep('<', 200), W.real(W.HOME)
   local first = a:call('templates.start', {template = 'lt-key', root = root, key = key})
   expect(a:call('templates.start', {template = 'lt-key', root = root, key = key}).run_id).to_be(first.run_id)
@@ -138,8 +139,8 @@ end)
 test('a long refusal from the hub is stored bounded; the run blocks and can be dismissed', function()
   local a = agent('alice')
   local name = 'long-profile'
-  W.twrite({{key = 'template/' .. W.hex(name), value = {v = 1, name = name, saved_by = 'alice',
-    tabs = {{title = 'one', layout = {launch = {profile = string.rep('z', 18000)}, dir = '.'}}}}}})
+  W.put_template(W.hex(name), {v = 1, name = name, saved_by = 'alice',
+    tabs = {{title = 'one', layout = {launch = {profile = string.rep('z', 18000)}, dir = '.'}}}})
   local r = a:call('templates.start', {template = name, root = W.real(W.HOME), key = 'long-profile'})
   local run = W.wait_run(a, r.run_id, 'blocked')
   expect(#run.error <= 512).to_be(true)
@@ -156,7 +157,7 @@ end)
 -- the bound is refused before anything is written.
 test('an oversized input session ID is refused before the start is written', function()
   local a = agent('alice')
-  W.twrite({{key = 'template/6964', value = {v = 1, name = 'id', saved_by = 'alice', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}}}})
+  W.put_template('6964', {v = 1, name = 'id', saved_by = 'alice', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
   local before = W.next_run_id()
   expect_error(function()
     a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = string.rep('s', 25000), key = 'long-session'})
@@ -165,7 +166,7 @@ test('an oversized input session ID is refused before the start is written', fun
     a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = 'session:"quoted"', key = 'odd-session'})
   end, 'invalid_input')
   expect(W.next_run_id()).to_be(before)
-  expect(W.rec(W.start_form_key_agent('alice', 'long-session')).value).to_be(nil)
+  expect(W.form(W.agent_start_key('alice', 'long-session'))).to_be(nil)
 end)
 
 test('a key with a control character is refused', function()

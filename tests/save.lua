@@ -55,7 +55,7 @@ test('lab 1 a pane left undecided is refused; Leave out removes the pane and its
   values[pane_field(s, 'busy')] = '@skip'
   values[pane_field(s, 'tail')] = 'profile:server'
   expect(form:action('save_template', 'submit', {values = values}, 'lab1-save').status).to_be('succeeded')
-  expect(W.template(values.name)).to_equal({v = 1, name = values.name, saved_by = 'user', tabs = {
+  expect(W.template(W.hex(values.name)).value).to_equal({v = 1, name = values.name, saved_by = 'user', tabs = {
     {title = 'code', layout = {direction = 'horizontal', ratio = 0.4, before = {launch = {shell = true}, dir = 'api'}, after = {launch = {shell = true}, dir = 'web'}}},
     {title = 'logs', layout = {direction = 'vertical', ratio = 0.5, before = {launch = {shell = true}, dir = 'web'}, after = {launch = {profile = 'server'}, dir = '.'}}}}})
 end)
@@ -83,7 +83,7 @@ test('a login pane has the directory of its foreground shell and no launch guess
   expect(values['pane_' .. b]).to_be('@choose')
   values.name, values['pane_' .. b] = 'login-form', 'shell'
   expect(form:action('save_template', 'submit', {values = values}, 'login-save').status).to_be('succeeded')
-  expect(W.template('login-form').tabs).to_equal({{title = 'shell', layout = {launch = {shell = true}, dir = 'api'}}})
+  expect(W.template(W.hex('login-form')).value.tabs).to_equal({{title = 'shell', layout = {launch = {shell = true}, dir = 'api'}}})
   -- The agent path: the same pane with an explicit shell.
   expect(alice:call('templates.save', {name = 'login-agent', root = root, session_id = s, panes = {[b] = 'shell'}, key = 'login-agent'}))
     .to_equal({name = 'login-agent'})
