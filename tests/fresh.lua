@@ -40,3 +40,18 @@ test('after a hub restart the counter continues: it is not set again', function(
   expect(tonumber(W.template(W.hex('fresh-2')).rev)).to_be(before + 1)
   expect(tonumber(rev())).to_be(before + 1)
 end)
+
+-- Schema step 3 deletes the metadata of the removed import (meta 'import' and 'import/...') from
+-- a database at schema 2. Other meta rows stay.
+test('a database at schema 2 loses the import metadata at the next start; other meta rows stay', function()
+  local counter = rev()
+  for _, k in ipairs({'import', 'import/template', 'import/template-done', 'import/floor-2'}) do
+    W.sql_write('INSERT INTO meta (k, v) VALUES (?, ?)', {k, '1'})
+  end
+  W.sql_write('PRAGMA user_version = 2')
+  hub:restart()
+  agent('alice'):call('templates.list', {})
+  expect(sql("SELECT count(*) AS n FROM meta WHERE k = 'import' OR k LIKE 'import/%'")[1].n).to_be(0)
+  expect(rev()).to_be(counter)
+  expect(sql('PRAGMA user_version')[1].user_version).to_be(3)
+end)
