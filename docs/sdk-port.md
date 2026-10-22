@@ -371,22 +371,40 @@ The hub tracks the tables that a render reads when the render opts in (`refresh 
 main eb61bb2 and d7d143c, docs/hub.md "SQL read tracking"; the SDK opt-in comes with SDK 4.2).
 Any hub call in the render other than a `hub.sql.query` with its render ID makes the render
 untracked, and the view keeps the default (each SQL commit renders it again). The hub cannot see
-Rex calls, Lua state, files or the clock. This audit lists each view's inputs outside SQL
-(Templates 9969f30; read in source, not tested with the opt-in).
+Rex calls, Lua state, environment variables, files, subprocesses or the clock. This audit lists
+each view's inputs outside SQL (Templates 9969f30; read in source). "Safe to opt in" is a source-audit
+proposal: it holds only after tests with the opt-in.
+
+The opt-in also needs this SDK condition (docs/hub.md, "SQL read tracking"): `"reads"` states that
+every hub call of the render reached the hub and returned without error, so the SDK omits `refresh`
+when any hub call of the render fails, also one that the plugin catches (`pcall(hub, ...)`) and one
+that never reaches the hub. The hub cannot see a call that did not reach it.
 
 - Panel (`/panels/templates`): templates, runs, run counts and switches from SQL. Outside SQL:
   `HOME` only (`short`), which does not change while the plugin runs. Safe to opt in.
 - Template menu (`/forms/template/<hex>`) and Delete confirmation (`/forms/delete/<hex>/<rev>`):
   the template row from SQL only. Safe to opt in.
-- Start form (`/forms/start`): the Lua table `starting[view_id]`, Rex reads (the source pane's
-  directory and git root, `source_dir`), and `hub.session.list`. On the normal path the
-  `hub.session.list` call makes the render untracked. Two early paths (template gone, list too
-  large) read SQL and `starting` only. Each change of `starting` calls `hub.ui.invalidate` (set at
-  `start_poll`; cleared after a definite error in `start_session`), which renders the views apart
-  from the table set, or closes the form (cleared before `done`). Safe to opt in.
-- Save form (`/forms/save`): Rex reads (`capture`) and, with panes, `hub.session.list`, so the
-  render is untracked; with no panes it reads no table, so it is never tracked. Opting in gains
-  nothing.
+- Start form (`/forms/start`, `start_view`):
+  - Always: the Lua table `starting[view_id]` (the "Starting…" state).
+  - The early paths, which return before any other input: a named template that is missing or has
+    an unusable name, an empty template list, the fixed tree over the budget (`too_large_view`), a
+    selected template option that does not fit, and no usable template option. They read SQL and
+    `starting` only.
+  - The normal path also reads the source pane (`source_dir`: Rex `terminal.process` and
+    `terminal.pwd` through `pane_dir`, the file system through `realpath` and `test -d`, and the
+    git root through a `git` subprocess) and calls `hub.session.list`. That hub call makes the
+    render untracked.
+  - Each change of `starting` calls `hub.ui.invalidate` (set in `start_poll`; cleared after a
+    definite error in `start_session`), which renders the views apart from the table set, or
+    closes the form (cleared before the `done` result). Safe to opt in.
+- Save form (`/forms/save`, `save_tree`): reads no table.
+  - `capture`: Rex `session.attach`, `session.view` and `session.list_blocks`; `hub.spawn.spec`
+    for each kept pane; `pane_dir` (Rex `terminal.pwd`, the file system).
+  - With panes, `save_fields`: `hub.profiles` (caught with `pcall`), `common_root` (git and the
+    file system), `is_shell` (`SHELL`) and `short` (`HOME`); and `session_label`
+    (`hub.session.list`).
+  - The hub calls make the render untracked, and a render that reads no table is never tracked.
+    Opting in gains nothing.
 
 Lab check (no opt-in yet): Templates 9969f30 on hub main 12c186c with its `sdk/lua`, Rex
 0.0.1792158932-g88fd41: 25 of 25 files, 244 tests, parity sweep 4/4. With no opt-in, every view
