@@ -220,6 +220,7 @@ local function run_value(id, key, status, extra)
   return v
 end
 local K1, K2, K3, K4 = 'start/' .. part('i2-live'), 'start/' .. part('i2-mark'), 'start/' .. part('i2-legacy'), 'start/' .. part('i2-noat')
+local K5 = 'start/' .. part('i2-zcontr') -- the control marker: start/9:..., after K2 and K3
 
 test('slice 2 imports every start record shape exactly, after a completed slice 1 import', function()
   agent('alice')
@@ -227,12 +228,15 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
   write({{key = 'start-form/' .. hex(K2), value = {fingerprint = 'fp-2', request = {key = K2}, at = 123}},
     {key = 'start-form/' .. hex(K4), value = {fingerprint = 'fp-4', request = {key = K4}}}})
   local form_rev = store('start-form/' .. hex(K2)).rev
+  -- The markers expired 60 s ago: inside MARKER_TTL (30 days), so the start cleanup keeps them.
+  local E2 = os.time() - 60
+  local E3 = E2 + 1
   write({{key = 'run/' .. BIG, value = run_value(BIG, K1, 'open')},
     {key = 'run/77', value = run_value('77', 'start/' .. part('i2-agent'), 'dismissed', {dismissed_from = 'blocked', grant_id = 'grant:i2', grant_revoked = true})},
     {key = 'run-counter', value = BIG},
     {key = 'run-key/' .. K1, value = {id = BIG}},
-    {key = 'run-key/' .. K2, value = {id = '5', expired_at = 1000, form_rev = form_rev}},
-    {key = 'run-key/' .. K3, value = {id = '6', expired_at = 1001}},
+    {key = 'run-key/' .. K2, value = {id = '5', expired_at = E2, form_rev = form_rev}},
+    {key = 'run-key/' .. K3, value = {id = '6', expired_at = E3}},
     {key = 'switch/' .. hex(K1), value = {state = 'refused', code = 'timeout', message = 'm'}}})
   put_operation({key = 'dismiss/' .. part('i2-x'), fingerprint = 'fp-dismiss', result = {run_id = '5', status = 'dismissed'}})
   put_operation({key = 'retry/' .. part('i2-y'), fingerprint = 'fp-retry', result = {run_id = '5', woken = true}})
@@ -241,8 +245,15 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
   for _, k in ipairs({'import', 'import/template-done', 'import/ops-done'}) do
     W.sql_write('INSERT INTO meta (k, v) VALUES (?, ?)', {k, k == 'import' and 'done' or '1'})
   end
+  -- The barrier: the engine runs a marker cleanup at each start (templates_run.lua, "Retention").
+  -- It scans the markers past MARKER_TTL in key order and expires them in that order, so when the
+  -- control marker K5 (after K2 and K3 in key order) is gone, the cleanup has passed K2 and K3.
+  expect(K5 > K2 and K5 > K3).to_be(true)
+  W.sql_write('INSERT INTO run_keys (key, run_id, expired_at) VALUES (?, ?, ?)', {K5, '7', 1002})
+  expect(#sql('SELECT key FROM run_keys WHERE key = ?', {K5})).to_be(1)
   restart()
   slice2_done()
+  wait('the start cleanup', function() return #sql('SELECT key FROM run_keys WHERE key = ?', {K5}) == 0 or nil end, 30)
   -- Runs: exact value, exact 32-digit ID, status = value.status. Both runs are final (open,
   -- dismissed), so the resumed engine does not change them before the comparison.
   expect(W.rec('run/' .. BIG).value).to_equal(store('run/' .. BIG).value)
@@ -251,8 +262,8 @@ test('slice 2 imports every start record shape exactly, after a completed slice 
   expect(meta_v('run-counter')).to_be(BIG)
   -- Run keys: live, marker with form_rev, legacy marker (NULL form_rev).
   expect(W.rec('run-key/' .. K1).value).to_equal({id = BIG})
-  expect(W.rec('run-key/' .. K2).value).to_equal({id = '5', expired_at = 1000, form_rev = form_rev})
-  expect(W.rec('run-key/' .. K3).value).to_equal({id = '6', expired_at = 1001})
+  expect(W.rec('run-key/' .. K2).value).to_equal({id = '5', expired_at = E2, form_rev = form_rev})
+  expect(W.rec('run-key/' .. K3).value).to_equal({id = '6', expired_at = E3})
   -- Start forms: the store rev, and at NULL in a legacy form.
   local f2, f4 = W.rec('start-form/' .. hex(K2)), W.rec('start-form/' .. hex(K4))
   expect(f2.rev).to_be(form_rev)
