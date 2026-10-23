@@ -60,27 +60,41 @@ test('lab 1 a pane left undecided is refused; Leave out removes the pane and its
     {title = 'logs', layout = {direction = 'vertical', ratio = 0.5, before = {launch = {shell = true}, dir = 'web'}, after = {launch = {profile = 'server'}, dir = '.'}}}}})
 end)
 
--- A default pane runs the shell through login: the child (login) has no cwd, the foreground shell
--- has it. Without terminal.pwd, the directory comes from the foreground.
--- The child is not a shell, so the pane has no launch guess: the user chooses Shell.
-test('a login pane has the directory of its foreground shell and no launch guess', function()
+-- A default pane has one of two process shapes. The test accepts only these two:
+-- - login (observed on macOS): the shell runs through login. The child (login) has no cwd, the
+--   foreground shell has it. Without terminal.pwd, the directory comes from the foreground. The
+--   child is not a shell, so the pane has no launch guess: the user chooses Shell.
+-- - shell (observed on Linux, Rex 0.0.1792593189-g3f4a0a): the child is the shell itself, in the
+--   foreground (the same pid, path and cwd). The pane is an idle shell, so it has the guess shell.
+local SHELLS = {bash = true, zsh = true, sh = true, dash = true, fish = true}
+local function shape_of(p)
+  local c, f = p.child, p.foreground
+  if not (c and f) then return nil end
+  if c.name == 'login' and not c.cwd and f.cwd then return 'login' end
+  if c.pid and c.pid == f.pid and c.path == f.path and c.cwd and c.cwd == f.cwd and SHELLS[c.name] then return 'shell' end
+  return nil
+end
+test('a default pane has the directory of its foreground shell; a login child gives no launch guess', function()
   local alice = agent('alice')
   local root = W.repo('login-shell')
   local s = W.new_session('login-shell', {{window_label = 'shell', layout = W.login(root .. '/api')}})
   local b = W.first_block(s)
-  wait('the login shell', function()
-    local p = rex.call('com.superlogical.terminal.process', {session_id = s, block_id = b, args = {}})
-    return p.child and p.child.name == 'login' and not p.child.cwd and p.foreground and p.foreground.cwd
+  local shape
+  wait('the default shell', function()
+    shape = shape_of(rex.call('com.superlogical.terminal.process', {session_id = s, block_id = b, args = {}}))
+    return shape
   end, 10)
+  local choice = ({login = '@choose', shell = 'shell'})[shape] -- the form value of the pane
   local pane = alice:call('templates.capture', {session_id = s}).panes[1]
   expect(pane.dir).to_be(root .. '/api')
-  expect(pane.guess).to_be(nil)
+  expect(pane.guess).to_be(shape == 'shell' and 'shell' or nil)
   expect(pane.detail).not_to_be('directory unknown')
-  -- The form: the pane is undecided, not left out. An explicit Shell saves it.
+  -- The form: the pane is undecided (login) or a shell (shell), not left out. An explicit Shell
+  -- saves it.
   local form = W.open('save_template', '/forms/save', s, b)
   local values = W.form_input(form:render(), 'save_template')
   expect(values.root).to_be(root)
-  expect(values['pane_' .. b]).to_be('@choose')
+  expect(values['pane_' .. b]).to_be(choice)
   values.name, values['pane_' .. b] = 'login-form', 'shell'
   expect(form:action('save_template', 'submit', {values = values}, 'login-save').status).to_be('succeeded')
   expect(W.template(W.hex('login-form')).value.tabs).to_equal({{title = 'shell', layout = {launch = {shell = true}, dir = 'api'}}})
