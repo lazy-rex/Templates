@@ -49,6 +49,22 @@ function M.new(app)
   })
 
   local function fail(code, message) error({code = code, message = message}, 0) end
+  -- decode reads a JSON column of a row that this file wrote. rex.json.decode does not raise on
+  -- invalid JSON: it returns nil and an error text (JSON null returns nil alone). So it checks the
+  -- error, and fails with internal for the row: the table and up to 80 bytes of its key.
+  local function decode(text, tbl, key)
+    local value, err = rex.json.decode(text)
+    if err ~= nil then
+      local k = tostring(key)
+      if #k > 80 then
+        local n = 80
+        while n > 0 and k:byte(n + 1) >= 0x80 and k:byte(n + 1) < 0xC0 do n = n - 1 end
+        k = k:sub(1, n) .. '…'
+      end
+      fail('internal', 'The Templates row ' .. tbl .. ' ' .. k .. ' is not valid JSON')
+    end
+    return value
+  end
   local function meta(k) local row = db.first('SELECT v FROM meta WHERE k = ?', k); return row and row.v end
   local function set_meta(k, v) db.exec('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v', k, v) end
   local function frame(sql, params)
@@ -131,7 +147,7 @@ function M.new(app)
   -- get_op returns {fingerprint, result} of an operation, or nil.
   function S.get_op(key)
     local row = db.first('SELECT fingerprint, result FROM ops WHERE key = ?', key)
-    if row then return {fingerprint = row.fingerprint, result = rex.json.decode(row.result)} end
+    if row then return {fingerprint = row.fingerprint, result = decode(row.result, 'ops', key)} end
   end
 
   -- Runs. get_run returns {ver, value} of run id, or nil.
