@@ -1,7 +1,8 @@
 -- A stored JSON value that is not valid JSON (templates_sql.lua, decode). rex.json.decode does not
--- raise on invalid JSON: it returns nil and an error text. JSON null returns nil alone. A reader of
--- a Templates row fails with internal and names the row; it never answers nil for it. Tests in
--- this file run in order on one hub and one database.
+-- raise on invalid JSON: it returns nil and an error text (JSON null returns nil alone, and is
+-- valid). The readers under test here (operation replies, start forms, runs) fail with internal for
+-- invalid JSON and name the row. Templates rows keep their own rule (templates.lua,
+-- read_template). Tests in this file run in order on one hub and one database.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local BAD = '{"a":' -- not valid JSON
@@ -53,4 +54,14 @@ test('a test reader raises on a stored row that is not valid JSON (W.decode)', f
   expect(ok).to_be(false)
   expect(tostring(err):find('not valid JSON', 1, true) ~= nil).to_be(true)
   W.sql_write('DELETE FROM templates WHERE hex = ?', {hx})
+end)
+
+test('a run row that is not valid JSON: templates.runs fails with internal and names the run', function()
+  local alice = agent('alice')
+  local id = '900000'
+  W.sql_write("INSERT INTO runs (id, ver, status, value) VALUES (?, 1, 'open', ?)", {id, BAD})
+  local err = failure(function() return alice:call('templates.runs', {limit = 100}) end)
+  expect(tostring(err.message):find('internal', 1, true) ~= nil or err.code == 'internal').to_be(true)
+  expect(tostring(err.message):find('runs ' .. id, 1, true) ~= nil).to_be(true)
+  W.sql_write('DELETE FROM runs WHERE id = ?', {id})
 end)

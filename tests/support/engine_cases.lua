@@ -207,6 +207,25 @@ function tests.roundtrip()
   expect_error(function() e.admit(req) end, 'operation_conflict')
   drain(e); assert(f.creates == 2)
 end
+-- A run row that is not valid JSON (templates_sql.lua, decode): get_run fails with internal. The tick
+-- that advances that run returns the error, and the run is off the queue. A separately invoked tick
+-- advances the next queued run. (The plugin's pump stops after a tick error: the next tick comes
+-- with the next wake, templates.lua, pump.)
+function tests.corrupt_run_fails_its_tick_only()
+  local f = fixture(); local e = f.engine()
+  local one, two = e.admit(request('a')), e.admit(request('b'))
+  local get = f.data.get_run
+  f.data.get_run = function(id)
+    if id == one.id then error({code='internal', message='The Templates row runs ' .. id .. ' is not valid JSON'}, 0) end
+    return get(id)
+  end
+  local ver = f.runs[two.id].ver
+  local _, err = e.tick()
+  assert(type(err) == 'table' and err.code == 'internal', 'The tick of the corrupt run returns its error')
+  assert(f.runs[two.id].ver == ver, 'The first tick advanced only the corrupt run')
+  local _, err2 = e.tick()
+  assert(err2 == nil and f.runs[two.id].ver > ver, 'A separate tick advances the next run')
+end
 function tests.admission_lost_reply()
   local f = fixture(); local e = f.engine(); f.lose_store = true
   assert(not pcall(e.admit, request()))

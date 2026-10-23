@@ -153,7 +153,7 @@ function M.new(app)
   -- Runs. get_run returns {ver, value} of run id, or nil.
   function S.get_run(id)
     local row = db.first('SELECT ver, value FROM runs WHERE id = ?', id)
-    if row then return {ver = row.ver, value = rex.json.decode(row.value)} end
+    if row then return {ver = row.ver, value = decode(row.value, 'runs', id)} end
   end
   -- insert_run writes a new run (ver 1). The caller checked that id is free in its transaction.
   function S.insert_run(run)
@@ -197,10 +197,10 @@ function M.new(app)
       params[#params + 1], params[#params + 2], params[#params + 3] = opts.before, opts.before, opts.before
       where[#where + 1] = '(length(id) < length(?) OR (length(id) = length(?) AND id < ?))'
     end
-    local sql = 'SELECT value FROM runs' .. (#where > 0 and ' WHERE ' .. table.concat(where, ' AND ') or '')
+    local sql = 'SELECT id, value FROM runs' .. (#where > 0 and ' WHERE ' .. table.concat(where, ' AND ') or '')
       .. ' ORDER BY length(id) DESC, id DESC'
     if opts.limit then sql, params[#params + 1] = sql .. ' LIMIT ?', opts.limit end
-    params[#params + 1] = function(row) fn(rex.json.decode(row.value)) end
+    params[#params + 1] = function(row) fn(decode(row.value, 'runs', row.id)) end
     return db.each(sql, unpack(params, 1, #params))
   end
   -- count_runs returns the number of runs with a status in statuses, and the number of all runs.
