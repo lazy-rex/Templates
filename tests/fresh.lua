@@ -40,4 +40,3 @@ test('after a hub restart the counter continues: it is not set again', function(
   expect(tonumber(W.template(W.hex('fresh-2')).rev)).to_be(before + 1)
   expect(tonumber(rev())).to_be(before + 1)
 end)
-
