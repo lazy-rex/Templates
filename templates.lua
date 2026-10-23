@@ -371,59 +371,37 @@ end
 
 -- Callers (agent parity). The UI user acts through views; an agent through an export, forwarded by
 -- the hub or called directly. The SDK identifies the agent from the requester PID that the hub or
--- Rex gives (hub.identify), never from an argument. caller = {id, ids, session_id, pid}: ids
--- are every ID of the agent (its identity and the legacy IDs it took over), so an operation
--- recorded under an older ID still matches. An agent may act on anything that the user can
--- (decision "Agents may act on anything", 2026-10-19): there is no owner check.
-local USER = {id = 'user', ids = {'user'}}
--- caller_of turns the SDK context of an agent call (ctx.agent, ctx.aliases: the legacy IDs) into a caller.
+-- Rex gives (hub.identify), never from an argument. caller = {id, session_id, pid}: id is the
+-- agent's identity. An agent may act on anything that the user can (decision "Agents may act on
+-- anything", 2026-10-19): there is no owner check.
+local USER = {id = 'user'}
+-- caller_of turns the SDK context of an agent call (ctx.agent) into a caller.
 local function caller_of(ctx)
   if type(ctx.agent) ~= 'string' or ctx.agent == '' then fail('refused', 'The hub does not recognize this agent') end
-  local ids = {ctx.agent}
-  for _, l in ipairs(type(ctx.aliases) == 'table' and ctx.aliases or {}) do
-    if type(l) == 'string' and l ~= '' then ids[#ids + 1] = l end
-  end
-  -- Every ID can be part of an operation key that a run write carries (templates_run.lua, size
-  -- bounds). An agent with a longer ID is refused as a whole; no ID is left out.
-  for _, id in ipairs(ids) do
-    if #id > run_module.MAX_ID or id:find('%c') then fail('refused', 'An ID of this agent is longer than ' .. run_module.MAX_ID .. ' bytes or has control characters') end
-  end
-  return {id = ctx.agent, ids = ids, session_id = ctx.session_id, pid = ctx.requester_pid}
+  -- The ID is part of each operation key that a run write carries (templates_run.lua, size bounds).
+  if #ctx.agent > run_module.MAX_ID or ctx.agent:find('%c') then fail('refused', 'The ID of this agent is longer than ' .. run_module.MAX_ID .. ' bytes or has control characters') end
+  return {id = ctx.agent, session_id = ctx.session_id, pid = ctx.requester_pid}
 end
 
 -- Operation keys. The UI keeps its key format: '<kind>/' .. part(view key) (part starts with a
 -- digit). An agent key is '<kind>/agent/' .. part(agent ID) .. part(key), so the two can never be
--- equal. op_keys lists the operation keys to look up for a caller: one per ID of the agent.
-local function op_keys(kind, caller, key)
+-- equal. op_key gives the operation key of a caller.
+local function op_key(kind, caller, key)
   text(key, caller.id == 'user' and 'operation key' or 'key')
   -- Bounded: dismiss and retry write the key with a run record (templates_run.lua, size bounds).
   if #key > run_module.MAX_KEY or key:find('%c') then
     fail('invalid_input', 'A key is at most ' .. run_module.MAX_KEY .. ' bytes, without control characters')
   end
-  if caller.id == 'user' then return {kind .. '/' .. part(key)} end
-  local list = {}
-  for _, id in ipairs(caller.ids) do list[#list + 1] = kind .. '/agent/' .. part(id) .. part(key) end
-  return list
+  if caller.id == 'user' then return kind .. '/' .. part(key) end
+  return kind .. '/agent/' .. part(caller.id) .. part(key)
 end
--- prior_op returns the saved result of the first key that has one (the caller's current ID
--- first), or nil. Two IDs of one agent that both saved the key are a conflict. The operations are
--- SQL rows (templates_sql.lua, ops).
-local function saved_op(k)
-  local op = data.get_op(k)
-  return op and {found = true, fingerprint = op.fingerprint, result = op.result} or {found = false}
-end
-local function prior_op(keys, fingerprint)
-  local found, result = 0, nil
-  for _, k in ipairs(keys) do
-    local saved = saved_op(k)
-    if saved.found then
-      found = found + 1
-      if saved.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
-      result = result or saved.result
-    end
-  end
-  if found > 1 then fail('conflict', 'Two IDs of this agent used the key; use a new key') end
-  return result
+-- prior_op returns the saved result of the key, or nil. The operations are SQL rows
+-- (templates_sql.lua, ops).
+local function prior_op(key, fingerprint)
+  local op = data.get_op(key)
+  if not op then return nil end
+  if op.fingerprint ~= fingerprint then fail('operation_conflict', 'Operation key already has different content') end
+  return op.result
 end
 
 -- canon is a canonical text of an agent's arguments for a fingerprint: type-tagged, part-framed,
@@ -476,8 +454,8 @@ local start_size
 -- replace (tests/templates-run.md, "Replace"): nil keeps an existing template (conflict); {rev = r}
 -- replaces exactly revision r (the agent path); {form = v} is the form's field: nil or "keep" keeps,
 -- "replace" replaces the record as it is at the submit.
-local function save_core(caller, keys, fingerprint, session_id, values, fill, replace)
-  local prior = prior_op(keys, fingerprint)
+local function save_core(caller, key, fingerprint, session_id, values, fill, replace)
+  local prior = prior_op(key, fingerprint)
   if prior then return prior end
   local latest = false
   if replace and replace.rev == nil then
@@ -543,7 +521,7 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill, re
   -- agent's replace names the revision that it read (templates.get), so only that revision is
   -- replaced. The form's Replace it replaces the template as it is at the commit.
   local outcome = app.db.transaction(function()
-    local again = prior_op(keys, fingerprint)
+    local again = prior_op(key, fingerprint)
     if again then return {result = again} end
     local existing = data.get_template(hex(name))
     if replace and replace.rev then
@@ -555,7 +533,7 @@ local function save_core(caller, keys, fingerprint, session_id, values, fill, re
         (caller.id == 'user' and 'choose Replace it.' or 'replace it: templates.get gives its rev.'))
     end
     data.put_template(hex(name), data.next_rev(), template)
-    data.put_op(keys[1], fingerprint, result)
+    data.put_op(key, fingerprint, result)
     return {result = result}
   end)
   return outcome.result
@@ -564,7 +542,7 @@ end
 local function save_template(args)
   local context = context_of(args)
   local values = form_values(args)
-  return save_core(USER, op_keys('save', USER, args.operation_key), values_fingerprint('save-v2/', context, values), context.session_id, values, false, {form = values.replace})
+  return save_core(USER, op_key('save', USER, args.operation_key), values_fingerprint('save-v2/', context, values), context.session_id, values, false, {form = values.replace})
 end
 
 -- templates.save {name, root, session_id?, panes?, key}. panes maps a block ID to 'shell',
@@ -595,11 +573,11 @@ local function agent_save(caller, args)
   local values = {name = args.name, root = args.root}
   for id, choice in pairs(args.panes or {}) do values['pane_' .. id] = choice == 'skip' and '@skip' or choice end
   if type(session_id) ~= 'string' or session_id == '' then
-    local prior = prior_op(op_keys('save', caller, args.key), fingerprint)
+    local prior = prior_op(op_key('save', caller, args.key), fingerprint)
     if prior then return prior end
     fail('invalid_input', 'You have no session; set session_id')
   end
-  return save_core(caller, op_keys('save', caller, args.key), fingerprint, session_id, values, true, args.replace and {rev = args.replace} or nil)
+  return save_core(caller, op_key('save', caller, args.key), fingerprint, session_id, values, true, args.replace and {rev = args.replace} or nil)
 end
 
 -- The engine and its adapter to hub.spawn_window. A user's start acts for "user"; an agent's
@@ -642,11 +620,10 @@ local function grant_entries(run)
 end
 local function grant_key(run) return 'run/' .. run.id end
 -- find_grant (engine recovery): the grant of this run if the hub has it, active and with exactly
--- the run's requests. It never creates one: that needs the agent's call. The agent is not compared:
--- the grant's agent can be a later ID of the run's agent (an identity that took over request.by),
--- and the plugin can identify only a caller, not an ID. The grant key run/<id> is the plugin's own
+-- the run's requests. It never creates one: that needs the agent's call. The grant's agent is not
+-- compared with request.by: the key gives the binding. The grant key run/<id> is the plugin's own
 -- (the hub scopes grant keys to the plugin), and start_core creates it only in the initial call
--- or a replay with this run's operation key, which only the run's agent (any of its IDs) can make.
+-- or a replay with this run's operation key, which only the run's agent can make.
 local function find_grant(run)
   local g = hub('hub.grant.get', {key = grant_key(run)})
   if not g.found or g.state ~= 'active' then return nil end
@@ -670,7 +647,7 @@ local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = 
   data = data, transaction = app.db.transaction, wake = function() if loop.pump then loop.pump() end end,
   retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end})
 -- start_size measures four references (engine.measure): a user and an agent start, each into a new
--- and an existing session. The keys are built as op_keys builds them, with the longest agent ID
+-- and an existing session. The keys are built as op_key builds them, with the longest agent ID
 -- and key of "<" (6 bytes each in JSON). The new session name is the template name (the default).
 -- The window ID and the session ID are MAX_ID bytes.
 start_size = function(template, root)
@@ -827,7 +804,7 @@ end
 local function start_poll(args)
   local context = context_of(args)
   local values = form_values(args)
-  local key = op_keys('start', USER, args.operation_key)[1]
+  local key = op_key('start', USER, args.operation_key)
   local intent = {template = values.template, root = values.root}
   -- Each tab focuses its first pane only while the form's tab is still the active one in the
   -- target session (hub.spawn_window). In a new session it never matches; switch_app moves the app.
@@ -880,20 +857,7 @@ local function agent_start(caller, args)
   if args.session_id and args.new_session then fail('invalid_input', 'Set session_id or new_session, not both') end
   local fingerprint = 'start-agent-v1/' .. canon({template = args.template, root = args.root,
     session_id = args.session_id or false, new_session = args.new_session or false})
-  local keys = op_keys('start', caller, args.key)
-  -- A start of another ID of this agent with this key is the same operation (its record). Two IDs
-  -- that both started with the key are a conflict, also with equal arguments (prior_op).
-  local key, found = keys[1], 0
-  for _, k in ipairs(keys) do
-    -- A form whose retired run's marker has expired does not count (start_core).
-    local f = data.get_form(k)
-    if f and not run_module.form_expired(f, data.get_run_key(k), os.time()) then
-      found = found + 1
-      if found == 1 then key = k end
-    end
-  end
-  if found > 1 then fail('conflict', 'Two IDs of this agent used the key; use a new key') end
-  local _, run = start_core(caller, key, fingerprint, {template = args.template, root = args.root,
+  local _, run = start_core(caller, op_key('start', caller, args.key), fingerprint, {template = args.template, root = args.root,
     session_id = args.session_id, new_session_name = args.new_session})
   return {run_id = run.id}
 end
@@ -1223,37 +1187,37 @@ end
 
 -- Delete: the deletion and its result commit together; a retry never deletes a newer template.
 -- The operation answers first. An agent deletes any template, as the user does.
-local function delete_core(caller, keys, name)
+local function delete_core(caller, key, name)
   local fingerprint = 'delete-v1/' .. part(tostring(name))
-  local prior = prior_op(keys, fingerprint)
+  local prior = prior_op(key, fingerprint)
   if prior then return prior end
   -- One short transaction: the replay, the read and the deletion with its operation. An agent
   -- deletes the template by name as it is at the commit, so no revision guard is needed.
   return app.db.transaction(function()
-    local again = prior_op(keys, fingerprint)
+    local again = prior_op(key, fingerprint)
     if again then return again end
     local _, _, hx = load_template(name)
     data.delete_template(hx)
-    data.put_op(keys[1], fingerprint, {})
+    data.put_op(key, fingerprint, {})
     return {}
   end)
 end
 -- The panel's delete (/forms/delete/<hex>/<rev>): the key and the revision come from the route that
 -- the user confirmed, never from submitted values. The replay answers first.
-local function delete_ui(keys, hx, rev)
+local function delete_ui(key, hx, rev)
   local fingerprint = 'delete-ui-v1/' .. part(hx) .. part(rev)
-  local prior = prior_op(keys, fingerprint)
+  local prior = prior_op(key, fingerprint)
   if prior then return prior end
   local result = {close_form = true}
   -- Revision guard: the user confirmed the revision in the route, so only that revision is
   -- deleted; a template replaced after the choice is kept.
   return app.db.transaction(function()
-    local again = prior_op(keys, fingerprint)
+    local again = prior_op(key, fingerprint)
     if again then return again end
     local existing = data.get_template(hx)
     if not existing or existing.rev ~= rev then fail('conflict', 'The template changed after you chose Delete. Open it again.') end
     data.delete_template(hx)
-    data.put_op(keys[1], fingerprint, result)
+    data.put_op(key, fingerprint, result)
     return result
   end)
 end
@@ -1265,15 +1229,15 @@ local function find_run(id)
   if #id > 32 or not id:match('^%d+$') then fail('not_found', 'Template run not found') end
   return engine.get(id)
 end
-local function dismiss_core(caller, keys, id)
+local function dismiss_core(caller, key, id)
   local fingerprint = 'dismiss-v1/' .. part(tostring(id))
-  local prior = prior_op(keys, fingerprint)
+  local prior = prior_op(key, fingerprint)
   if prior then return prior end
   find_run(id)
   -- The dismissed state and the operation result commit in one transaction (engine.dismiss).
-  local ok, err = pcall(engine.dismiss, id, {key = keys[1], fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
+  local ok, err = pcall(engine.dismiss, id, {key = key, fingerprint = fingerprint, result = {run_id = id, status = 'dismissed'}})
   if not ok then
-    if type(err) == 'table' and err.code == 'op_exists' then return prior_op(keys, fingerprint) end
+    if type(err) == 'table' and err.code == 'op_exists' then return prior_op(key, fingerprint) end
     error(err, 0)
   end
   pump()
@@ -1282,17 +1246,17 @@ end
 -- Retry queues a stuck run again. The queued state commits with the operation (engine.retry), so
 -- a lost reply loses no retry. A replay answers from the saved operation and schedules the run
 -- (wake_one): a queued run dispatches, and a run that is stuck again is not retried again.
-local function retry_core(caller, keys, id)
+local function retry_core(caller, key, id)
   local fingerprint = 'retry-v1/' .. part(tostring(id))
-  local prior = prior_op(keys, fingerprint)
+  local prior = prior_op(key, fingerprint)
   if prior then
     if prior.woken then engine.wake_one(id); pump() end
     return prior
   end
   find_run(id)
-  local ok, result = pcall(engine.retry, id, {key = keys[1], fingerprint = fingerprint})
+  local ok, result = pcall(engine.retry, id, {key = key, fingerprint = fingerprint})
   if not ok then
-    if type(result) == 'table' and result.code == 'op_exists' then return retry_core(caller, keys, id) end
+    if type(result) == 'table' and result.code == 'op_exists' then return retry_core(caller, key, id) end
     error(result, 0)
   end
   pump()
@@ -1326,7 +1290,7 @@ local function action(args)
   if args.route:sub(1, 14) == '/forms/delete/' then
     local hx, rev = delete_route(args.route)
     if args.node_id ~= 'confirm' or args.action ~= 'submit' then fail('invalid_input', 'Unknown form action') end
-    return delete_ui(op_keys('delete', USER, args.operation_key), hx, rev)
+    return delete_ui(op_key('delete', USER, args.operation_key), hx, rev)
   end
   if args.route == '/panels/templates' then
     if args.node_id == 'start' then return {form = '/forms/start'} end
@@ -1341,10 +1305,10 @@ local function action(args)
     end
     if args.node_id == 'stuck' and type(item) == 'string' then
       if args.action == 'dismiss' and item:sub(1, 8) == 'dismiss:' then
-        dismiss_core(USER, op_keys('dismiss', USER, args.operation_key), item:sub(9)); return {}
+        dismiss_core(USER, op_key('dismiss', USER, args.operation_key), item:sub(9)); return {}
       end
       if args.action == 'retry' and item:sub(1, 6) == 'retry:' then
-        retry_core(USER, op_keys('retry', USER, args.operation_key), item:sub(7)); return {}
+        retry_core(USER, op_key('retry', USER, args.operation_key), item:sub(7)); return {}
       end
     end
   end
@@ -1512,15 +1476,15 @@ local agent_handlers = {
   end,
   ['templates.delete'] = function(caller, args)
     only(args, {template = true, key = true})
-    return delete_core(caller, op_keys('delete', caller, args.key), text(args.template, 'template'))
+    return delete_core(caller, op_key('delete', caller, args.key), text(args.template, 'template'))
   end,
   ['templates.dismiss'] = function(caller, args)
     only(args, {run_id = true, key = true})
-    return dismiss_core(caller, op_keys('dismiss', caller, args.key), text(args.run_id, 'run_id'))
+    return dismiss_core(caller, op_key('dismiss', caller, args.key), text(args.run_id, 'run_id'))
   end,
   ['templates.retry'] = function(caller, args)
     only(args, {run_id = true, key = true})
-    return retry_core(caller, op_keys('retry', caller, args.key), text(args.run_id, 'run_id'))
+    return retry_core(caller, op_key('retry', caller, args.key), text(args.run_id, 'run_id'))
   end,
 }
 local key_arg = {type = 'string', minLength = 1, description = 'Your operation key. Retry with the same key and content after an unknown outcome.'}

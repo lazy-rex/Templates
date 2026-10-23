@@ -115,17 +115,12 @@ not record. The plugin's `find_grant` accepts a grant only when all of these are
 
 - It is the grant with the key `run/<id>`. The hub scopes grant keys to the plugin. Only the
   plugin's start path creates this key, in the initial call or a replay with this run's
-  operation key. The operation key lookup covers only the identity set (the identity and its
-  legacy IDs) of the run's agent.
+  operation key. The operation key holds the ID of the run's agent.
 - It is active.
 - Its entries equal the run's requests exactly (canonical encoding).
 
-`find_grant` does not compare the grant's agent with `request.by`. After an identity migration,
-`request.by` can keep a legacy ID while the grant belongs to the current identity of the same
-agent (coordinator decision, 2026-10-19). No lab test covers this case: identity mode cannot
-make a legacy alias (coordinator ruling for identity step c(2)). `tests/restart.lua`
-"constructed boundary" covers the resume of a run with no recorded grant, with `request.by`
-equal to the grant's agent.
+`find_grant` does not compare the grant's agent with `request.by`: the key gives the binding.
+`tests/restart.lua` "constructed boundary" covers the resume of a run with no recorded grant.
 A finished agent run without a recorded grant is checked once per engine: a grant that it finds
 is recorded and then revoked. Nothing dispatches.
 
@@ -170,8 +165,7 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   The 60 s bound is a policy delay, not proof that every poll ended: this replay rule makes a late
   poll safe. Only the user path has it; an agent replay gets `expired`.
 - **Expiry.** A marker expires 30 days after `expired_at` (`now - expired_at >= 30 * 86400`). The
-  check is on each use, before the fingerprint check: in the agent's alias lookup, in `start_core`
-  and in `engine.admit`. A start form counts as absent only when its marker has expired
+  check is on each use, before the fingerprint check: in `start_core` and in `engine.admit`. A start form counts as absent only when its marker has expired
   and `form_rev` equals its rev. Then the new start replaces the form and the run key in the
   admission transaction, which reads both again.
 - **Cleanup.** After the first full scan and then every 24 hours, the engine reads a page of
@@ -385,7 +379,7 @@ JSON), and the record grows after admission. Every field that a later write adds
 | A grant ID | 1 to 128 characters of `[A-Za-z0-9.:_-]` | `engine.authorize` refuses it with `invalid_input`. Recovery (`find_grant`) does not record it: the run stays authorizing and dispatches nothing. A finished run records no grant. |
 | The block IDs of a tab result | The number of leaves of the tab | The result is invalid. |
 | An operation key (agent `key`, UI operation key) | 200 bytes, no control characters | `invalid_input`; nothing is written. |
-| An agent ID (the identity and each legacy ID) | 128 bytes, no control characters | `refused`. The plugin refuses the agent if any one of its IDs is outside the bound. It does not drop an ID. |
+| An agent ID (the identity) | 128 bytes, no control characters | `refused`. |
 | A run ID in a dismiss or retry | 32 digits | `not_found`. |
 | The run counter at admission | 32 digits | `unavailable` ("The run counter is full"); nothing is written. |
 
@@ -420,7 +414,7 @@ paths. The user path and the agent path always have the same outcome.
 A run record holds its template about three times, so a template that its save accepts could be
 too large to start. Save (`save_core`, both paths) measures four reference starts of the new
 template at the save's resolved root R with `engine.measure`. Each reference is a valid request,
-built as `op_keys` builds the key:
+built as `op_key` builds the key:
 
 - a user start into a new session and into an existing session: the key `start/` + part(MAX_KEY
   of `<`), and `placement.focus.source_window_id` of MAX_ID bytes;
