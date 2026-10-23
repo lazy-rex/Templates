@@ -43,9 +43,14 @@ local SCHEMA_2 = {
 function M.new(app)
   local db = app.db
   local S = {}
-  db.migrate({
-    function(d) for _, sql in ipairs(SCHEMA) do d.exec(sql) end end,
-    function(d) for _, sql in ipairs(SCHEMA_2) do d.exec(sql) end end,
+  -- base = 2: one base step makes schema version 2, the schema of the steps 1 and 2 that the 4.2
+  -- release ships (tests/schema.lua). Every live database is at version 2 or above. A step that
+  -- first ships in a later release is a numbered entry above the base.
+  db.migrate({base = 2,
+    function(d)
+      for _, sql in ipairs(SCHEMA) do d.exec(sql) end
+      for _, sql in ipairs(SCHEMA_2) do d.exec(sql) end
+    end,
     -- 3: delete the metadata of the removed hub.store import (its cursors and done flags).
     "DELETE FROM meta WHERE k = 'import' OR k LIKE 'import/%'",
   })
