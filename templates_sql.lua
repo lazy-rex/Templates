@@ -243,7 +243,7 @@ function M.new(app)
   -- Start forms. get_form returns {rev, fingerprint, request, at} of key, or nil.
   function S.get_form(key)
     local row = db.first('SELECT rev, fingerprint, request, at FROM start_forms WHERE key = ?', key)
-    if row then return {rev = row.rev, fingerprint = row.fingerprint, request = rex.json.decode(row.request), at = row.at} end
+    if row then return {rev = row.rev, fingerprint = row.fingerprint, request = decode(row.request, 'start_forms', key), at = row.at} end
   end
   -- put_form writes the form of key with a new revision (it replaces a form that the caller found
   -- free) and returns the revision.
