@@ -753,9 +753,12 @@ function M.new(opts)
         local more = #page == SCAN_LIMIT
         for _, run in ipairs(page) do
           scan.after = run.id
-          if (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
-          if type(run) == 'table' and type(run.id) == 'string' and eligible(run) and not kept.ids[run.id] then
-            kept.ids[run.id], kept.n = true, kept.n + 1
+          -- A row that is not valid JSON (data.run_summaries: invalid) is skipped: the cursor moves past it.
+          if not run.invalid then
+            if (not finished(run) or owes_revoke(run) or owes_grant_check(run)) then enqueue(run.id) end
+            if type(run) == 'table' and type(run.id) == 'string' and eligible(run) and not kept.ids[run.id] then
+              kept.ids[run.id], kept.n = true, kept.n + 1
+            end
           end
         end
         scan.active = more

@@ -170,17 +170,31 @@ function M.new(app)
   -- run_summaries returns up to limit runs after run ID after (nil: from the first), in ID order,
   -- as {id, status, request = {by}, grant_id, grant_revoked}: the fields of the engine's rules
   -- (finished, owes_revoke, owes_grant_check, eligible). The -> operator keeps each JSON type. The
-  -- page is read with db.each.
+  -- page is read with db.each. A row whose value is not valid JSON comes back as {id, invalid = true}
+  -- (the JSON operators run only on a valid value), so the page and its cursor stay whole. The
+  -- plugin reports each such row once per process and never changes it: a person decides what to do
+  -- with it (coordinator ruling, 2026-10-22).
+  local reported = {}
   function S.run_summaries(after, limit)
     local rows = {}
-    db.each("SELECT id, status, value -> '$.request.by' AS by, value -> '$.grant_id' AS grant_id,"
-      .. " value -> '$.grant_revoked' AS grant_revoked FROM runs"
+    db.each("SELECT id, status, json_valid(value) AS valid,"
+      .. " CASE WHEN json_valid(value) THEN value -> '$.request.by' END AS by,"
+      .. " CASE WHEN json_valid(value) THEN value -> '$.grant_id' END AS grant_id,"
+      .. " CASE WHEN json_valid(value) THEN value -> '$.grant_revoked' END AS grant_revoked FROM runs"
       .. ' WHERE ?1 IS NULL OR length(id) > length(?1) OR (length(id) = length(?1) AND id > ?1)'
       .. ' ORDER BY length(id), id LIMIT ?2', after, limit, function(r) rows[#rows + 1] = r end)
     local out = {}
     for i, r in ipairs(rows) do
       local function json(v) if v ~= nil then return rex.json.decode(v) end end
-      out[i] = {id = r.id, status = r.status, request = {by = json(r.by)}, grant_id = json(r.grant_id), grant_revoked = json(r.grant_revoked)}
+      if r.valid ~= 1 then
+        out[i] = {id = r.id, invalid = true}
+        if not reported[r.id] then
+          reported[r.id] = true
+          print('templates: the run row ' .. r.id .. ' is not valid JSON; the run scan skips it and does not change it')
+        end
+      else
+        out[i] = {id = r.id, status = r.status, request = {by = json(r.by)}, grant_id = json(r.grant_id), grant_revoked = json(r.grant_revoked)}
+      end
     end
     return out
   end

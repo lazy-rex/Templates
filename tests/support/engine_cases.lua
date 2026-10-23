@@ -45,8 +45,11 @@ local function fixture()
     table.sort(ids, older)
     local out = {}
     for i = 1, math.min(#ids, limit) do
-      local run = f.runs[ids[i]].value
-      out[i] = {id=run.id, status=run.status, request={by=run.request.by}, grant_id=run.grant_id, grant_revoked=run.grant_revoked}
+      local row = f.runs[ids[i]]
+      if row.invalid then out[i] = {id=ids[i], invalid=true} else
+        local run = row.value
+        out[i] = {id=run.id, status=run.status, request={by=run.request.by}, grant_id=run.grant_id, grant_revoked=run.grant_revoked}
+      end
     end
     return out
   end
@@ -522,6 +525,26 @@ function tests.a_scan_reads_pages_of_scan_limit_after_the_last_run_id()
   for _, s in ipairs(f.scans) do if s.table == 'runs' then pages[#pages + 1] = s end end
   assert(#pages == 2 and pages[1].after == nil and pages[2].after == tostring(Run.SCAN_LIMIT), 'two pages, the second after the last ID')
   for i=1, Run.SCAN_LIMIT + 3 do assert(e.get(tostring(i)).status == 'open', 'run ' .. i) end
+end
+-- A page of rows that are not valid JSON (data.run_summaries gives {id, invalid = true}): the scan
+-- moves its cursor past them, and the runs after them resume and enter the kept index. The rows stay
+-- as they were.
+function tests.a_scan_skips_invalid_rows_and_goes_on()
+  local f=fixture()
+  for i = 1, Run.SCAN_LIMIT do f.runs[tostring(i)] = {ver=1, invalid=true} end
+  f.counter = tostring(Run.SCAN_LIMIT)
+  admitted(f, 3)
+  local e=f.engine(); e.resume(); drain(e)
+  local pages = {}
+  for _, s in ipairs(f.scans) do if s.table == 'runs' then pages[#pages + 1] = s end end
+  assert(#pages == 2 and pages[2].after == tostring(Run.SCAN_LIMIT), 'the second page is after the invalid page')
+  for i = Run.SCAN_LIMIT + 1, Run.SCAN_LIMIT + 3 do assert(e.get(tostring(i)).status == 'open', 'run ' .. i) end
+  local m = e.maintenance()
+  assert(m.ready and m.kept == 3, 'the full scan is done, and the kept index has the 3 runs')
+  for i = 1, Run.SCAN_LIMIT do
+    local r = f.runs[tostring(i)]
+    assert(r.invalid and r.ver == 1 and r.value == nil, 'the invalid row stays')
+  end
 end
 function tests.a_scan_does_not_retry_another_error()
   local f=fixture(); admitted(f, 1)

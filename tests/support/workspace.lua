@@ -179,7 +179,8 @@ function W.agent_start_key(agent_id, key) return 'start/agent/' .. W.part(agent_
 
 -- W.decode decodes a stored JSON text and raises on invalid JSON. rex.json.decode does not raise: it
 -- returns nil and an error text (JSON null returns nil alone). A reader that mixed two versions of
--- a row (a save between its part reads) then fails here, not at a later check.
+-- a row (a save between its part reads) fails here when the mixed text is not valid JSON; a mix
+-- can also be valid JSON.
 function W.decode(text)
   local value, err = rex.json.decode(text)
   if err ~= nil then error('W.decode: ' .. err, 2) end
