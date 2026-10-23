@@ -192,7 +192,7 @@ template. Code: `templates.lua`, `menu_view`, `delete_view`, `delete_ui`. Tests:
 `tests/delete_confirm.lua`.
 
 - **Identity.** A template is named by the hex of its name: the key of its SQL row
-  (`templates.hex`; the old store key was `template/<hex>`), not `value.name`. A record that
+  (`templates.hex`), not `value.name`. A record that
   Templates did not write can have another name inside. The panel row ID, the routes and every read
   use that hex.
 - **Routes.** The hub opens any form route that starts with `/forms/` (checked in the source of hub
@@ -320,8 +320,7 @@ Tests: `tests/titles.lua` (observed on Rex 0.0.1792158932-g88fd41 with LazyRex 0
 
 ## Storage
 
-Templates keeps every record in its SQL database (`templates_sql.lua`; LazyRex `docs/sql.md`) and
-makes no `hub.store` call (`tests/sdk.lua` checks the complete call record). The tables:
+Templates keeps every record in its SQL database (`templates_sql.lua`; LazyRex `docs/sql.md`). The tables:
 
 - `meta`: the revision counter (`rev`) and the run counter (`run-counter`).
 - `templates (hex, rev, value)`: `hex` is the hex of the name, `value` the template as JSON.

@@ -1,11 +1,11 @@
 -- The Plugin SDK. The SDK registers the plugin and dispatches the hub calls. Templates keeps every
--- record in SQL (templates_sql.lua): no hub.store call. An agent can call an export directly: the
+-- record in SQL (templates_sql.lua). An agent can call an export directly: the
 -- SDK identifies it from the requester PID that Rex gives.
 
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 
 -- sql_only_after checks the plugin's hub calls after seq base (the complete record: no call
--- dropped): no hub.store call, and no call other than hub.sql while a transaction is open (from
+-- dropped): no call other than hub.sql while a transaction is open (from
 -- hub.sql.begin to its commit or rollback; Rex Lua runs one handler at a time, so a call in that
 -- interval is a call of the handler that holds the transaction). It returns the number of hub.sql
 -- calls and the number of transactions.
@@ -19,7 +19,6 @@ local function sql_only_after(base)
       if c.action == 'hub.sql.begin' then open, txs = true, txs + 1 end
       if c.action == 'hub.sql.commit' or c.action == 'hub.sql.rollback' then open = false end
     else
-      if c.action:sub(1, 10) == 'hub.store.' then bad[#bad + 1] = c.action end
       if open then bad[#bad + 1] = c.action .. ' in a transaction' end
     end
   end

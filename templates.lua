@@ -1395,7 +1395,7 @@ local function list_page(after, limit)
     fail('invalid_input', 'after is a template name of at most ' .. MAX_AFTER_JSON .. ' bytes as JSON')
   end
   local page, size, last = {}, json_size({templates = {}}), nil
-  -- The rows in hex order (the order of the old store keys). SQL reads only the summary of each
+  -- The rows in hex order. SQL reads only the summary of each
   -- template: a row's JSON stays in the database. saved_by comes as JSON text (the -> operator),
   -- so it keeps its JSON type. A query reads at most LIST_MAX + 1
   -- rows with app.db.each (a row can be large: a foreign key of 63 KB), and the next query starts

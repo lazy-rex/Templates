@@ -1,5 +1,5 @@
 -- SQL storage of Templates (LazyRex docs/sql.md). This file owns the schema and the row writers.
--- Templates keeps every record in SQL and makes no hub.store call.
+-- Templates keeps every record in SQL.
 --
 -- Request size. A value is a JSON text, and a hub.sql request carries it as a string parameter, so
 -- it is JSON-encoded twice: each "\uXXXX" escape (<, >, & and others) gets one more byte, and each
