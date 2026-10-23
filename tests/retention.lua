@@ -88,7 +88,8 @@ test('a retired key is free again 30 days after its removal, also with changed a
 end)
 
 -- The UI boundary: the hub saves a completed view operation and answers it without a call to
--- Templates. A read hook on the start's start-form record proves that the plugin did not read it.
+-- Templates. The plugin's recorded hub calls prove that it did not read the start form (no SQL
+-- statement on start_forms; the complete record: no call dropped).
 test('a completed Start form after its run was retired: the hub answers; Templates is not called', function()
   local alice = agent('alice')
   local name, root = template(alice)
@@ -102,7 +103,7 @@ test('a completed Start form after its run was retired: the hub answers; Templat
   local id = op.result.run_id
   W.wait_run(alice, id, 'open')
   retire(alice, id)
-  local hook = inject({match = {reads = 'start-form/' .. W.hex(W.start_key('ret-ui'))}, ops = {{key = 'probe/ret-ui', value = 1}}, times = 'always'})
+  local _, base = calls('none')
   local again = operation(key)
   expect(again.status).to_be('succeeded')
   expect(again.result.run_id).to_be(id)
@@ -110,8 +111,13 @@ test('a completed Start form after its run was retired: the hub answers; Templat
   expect_error(function()
     form2:admit('action', {node_id = 'start_session', action = 'submit', input = {values = values}, operation_key = key})
   end, 'operation_conflict')
-  expect(injection(hook).consumed).to_be(0)
-  cancel_injection(hook)
+  local list, out = calls('', {after = base.next})
+  expect(out.dropped).to_be(false)
+  local reads = 0
+  for _, c in ipairs(list) do
+    if rex.json.encode(c.args):find('start_forms', 1, true) then reads = reads + 1 end
+  end
+  expect(reads).to_be(0)
 end)
 
 -- A Start form into a new session stays open until its switch decision (switch_app). Retention
