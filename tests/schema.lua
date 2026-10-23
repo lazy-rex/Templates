@@ -1,9 +1,8 @@
--- The schema of a new database (templates_sql.lua). The expected objects are the schema of the
--- migration steps 1 and 2 that the 4.2 pin ships (3d93b39), written out here: a base step that
--- replaces those steps must make the same schema (LazyRex docs/plugin-sdk.md, "A base step").
--- Step 3 changes rows only, so the schema stays the same after it.
+-- The schema of a new database (templates_sql.lua). The expected objects are the schema of version
+-- 3, written out here (the steps 1 and 2 made it; step 3 changed rows only). The base step must
+-- make the same schema as the live databases (LazyRex docs/plugin-sdk.md, "A base step").
 
--- The schema objects of the steps 1 and 2, in the order of their statements.
+-- The schema objects of version 3, in the order of their statements.
 local OLD = {
   {'table', 'meta', 'CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)'},
   {'table', 'templates', 'CREATE TABLE templates (hex TEXT PRIMARY KEY, rev INTEGER NOT NULL, value TEXT NOT NULL)'},
@@ -20,7 +19,7 @@ local OLD = {
 -- normal gives the SQL text with each run of white space as one space, and no space at the ends.
 local function normal(s) return (s:gsub('%s+', ' '):gsub('^ ', ''):gsub(' $', '')) end
 
-test('a new database has the schema of the steps 1 and 2, at version 3', function()
+test('a new database has the schema of version 3', function()
   agent('alice'):call('templates.list', {})
   -- The plugin's own objects only: not SQLite's (sqlite_*) or the hub's (lazyrex_*). An automatic
   -- index (a PRIMARY KEY) has no SQL text.

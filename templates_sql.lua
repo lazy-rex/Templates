@@ -22,15 +22,14 @@ local SCHEMA = {
   -- The saved replies of Templates operations (key: "<kind>/..."; Templates keeps its own replay:
   -- {store = false}, coordinator decision, 2026-10-22).
   'CREATE TABLE ops (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)',
-}
--- The start records. A run ID is decimal text of up to 32 digits (MAX_RUN_ID, over an SQLite
--- INTEGER): runs sort by length(id), then id. status is a copy of value.status: each writer sets
--- both in one statement. ver counts the writes of a run: a write after a hub call checks the ver
--- that its read gave. A run_keys row with expired_at NULL names its live run; else it is the marker
--- of a retired run, and form_rev is the rev of its start form. A start_forms row is the frozen
--- request of a start: rev is a revision of meta 'rev', and at is its submit time. A switches row
--- is the app switch decision of a Start form ('attempted', then 'done', 'refused' or 'unknown').
-local SCHEMA_2 = {
+  -- The start records. A run ID is decimal text of up to 32 digits (MAX_RUN_ID, over an SQLite
+  -- INTEGER): runs sort by length(id), then id. status is a copy of value.status: each writer sets
+  -- both in one statement. ver counts the writes of a run: a write after a hub call checks the ver
+  -- that its read gave. A run_keys row with expired_at NULL names its live run; else it is the
+  -- marker of a retired run, and form_rev is the rev of its start form. A start_forms row is the
+  -- frozen request of a start: rev is a revision of meta 'rev', and at is its submit time. A
+  -- switches row is the app switch decision of a Start form ('attempted', then 'done', 'refused'
+  -- or 'unknown').
   'CREATE TABLE runs (id TEXT PRIMARY KEY, ver INTEGER NOT NULL, status TEXT NOT NULL, value TEXT NOT NULL)',
   'CREATE INDEX runs_order ON runs (length(id), id)',
   'CREATE INDEX runs_status ON runs (status)',
@@ -43,17 +42,10 @@ local SCHEMA_2 = {
 function M.new(app)
   local db = app.db
   local S = {}
-  -- base = 2: one base step makes schema version 2, the schema of the steps 1 and 2 that the 4.2
-  -- release ships (tests/schema.lua). Every live database is at version 2 or above. A step that
-  -- first ships in a later release is a numbered entry above the base.
-  db.migrate({base = 2,
-    function(d)
-      for _, sql in ipairs(SCHEMA) do d.exec(sql) end
-      for _, sql in ipairs(SCHEMA_2) do d.exec(sql) end
-    end,
-    -- 3: delete the metadata of the removed hub.store import (its cursors and done flags).
-    "DELETE FROM meta WHERE k = 'import' OR k LIKE 'import/%'",
-  })
+  -- base = 3: one base step makes schema version 3. Every live database is at version 3 (the
+  -- deploy of 2026-10-23); tests/schema.lua checks the schema. A new step is a numbered entry
+  -- above the base.
+  db.migrate({base = 3, function(d) for _, sql in ipairs(SCHEMA) do d.exec(sql) end end})
 
   local function fail(code, message) error({code = code, message = message}, 0) end
   -- decode reads a JSON column of a row that this file wrote. rex.json.decode does not raise on
