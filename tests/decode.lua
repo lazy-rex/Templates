@@ -45,3 +45,12 @@ test('a start form request that is not valid JSON: a retry of the start fails wi
   expect(tostring(err.message):find('internal', 1, true) ~= nil or err.code == 'internal').to_be(true)
   expect(tostring(err.message):find('start_forms', 1, true) ~= nil).to_be(true)
 end)
+
+test('a test reader raises on a stored row that is not valid JSON (W.decode)', function()
+  local hx = W.hex('dec-bad')
+  W.sql_write('INSERT INTO templates (hex, rev, value) VALUES (?, 1, ?)', {hx, BAD})
+  local ok, err = pcall(W.template, hx)
+  expect(ok).to_be(false)
+  expect(tostring(err):find('not valid JSON', 1, true) ~= nil).to_be(true)
+  W.sql_write('DELETE FROM templates WHERE hex = ?', {hx})
+end)

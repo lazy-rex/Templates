@@ -147,7 +147,7 @@ test('a failed append in a chunked run update commits nothing; the run keeps its
   expect(alice:call('templates.dismiss', {run_id = '9102', key = 'sr-append'})).to_equal({run_id = '9102', status = 'dismissed'})
   local after = run_row('9102')
   expect(after.ver).to_be(before.ver + 1)
-  expect(rex.json.decode(after.value).pad).to_be(string.rep('<', 9000))
+  expect(W.decode(after.value).pad).to_be(string.rep('<', 9000))
 end)
 
 -- status is a copy of value.status: every writer sets both (admission, each save, dismiss, the

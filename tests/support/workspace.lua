@@ -177,12 +177,20 @@ end
 function W.start_key(key) return 'start/' .. W.part(key) end
 function W.agent_start_key(agent_id, key) return 'start/agent/' .. W.part(agent_id) .. W.part(key) end
 
+-- W.decode decodes a stored JSON text and raises on invalid JSON. rex.json.decode does not raise: it
+-- returns nil and an error text (JSON null returns nil alone). A reader that mixed two versions of
+-- a row (a save between its part reads) then fails here, not at a later check.
+function W.decode(text)
+  local value, err = rex.json.decode(text)
+  if err ~= nil then error('W.decode: ' .. err, 2) end
+  return value
+end
 -- Runs: {ver, status, value}. W.put_runs writes whole run values (an existing run gets ver + 1);
 -- small values share one statement.
 function W.run(id)
   local r = sql('SELECT ver, status FROM runs WHERE id = ?', {id})[1]
   if not r then return nil end
-  return {ver = r.ver, status = r.status, value = rex.json.decode(text('runs', 'value', 'id', id))}
+  return {ver = r.ver, status = r.status, value = W.decode(text('runs', 'value', 'id', id))}
 end
 local SMALL = 12000 -- a run value of at most this many bytes goes in one statement with others
 local UPSERT_RUN = ' ON CONFLICT (id) DO UPDATE SET ver = runs.ver + 1, status = excluded.status, value = excluded.value'
@@ -244,7 +252,7 @@ function W.form(key)
   local r = sql('SELECT rev, at FROM start_forms WHERE key = ?', {key})[1]
   if not r then return nil end
   return {rev = r.rev, fingerprint = text('start_forms', 'fingerprint', 'key', key),
-    request = rex.json.decode(text('start_forms', 'request', 'key', key)), at = r.at}
+    request = W.decode(text('start_forms', 'request', 'key', key)), at = r.at}
 end
 function W.put_form(key, form)
   local rev = new_rev()
@@ -279,7 +287,7 @@ end
 function W.template(hx)
   local row = sql('SELECT CAST(rev AS TEXT) AS rev FROM templates WHERE hex = ?', {hx})[1]
   if not row then return nil end
-  return {rev = row.rev, value = rex.json.decode(text('templates', 'value', 'hex', hx))}
+  return {rev = row.rev, value = W.decode(text('templates', 'value', 'hex', hx))}
 end
 function W.put_template(hx, value)
   local rev = new_rev()
