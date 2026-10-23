@@ -3,7 +3,7 @@
  "sdk": "0",
  "main": "templates.lua",
  "test": {
-  "args": {"templates": {"switch_wait": "3"}},
+  "args": {"templates": {"switch_wait": "3", "switch_grace": "20", "retry_delay": "5"}},
   "profiles": "tests/profiles.json"
  }
 }

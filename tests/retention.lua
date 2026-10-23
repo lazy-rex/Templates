@@ -160,7 +160,7 @@ test('a run is not retired while its Start form waits for the switch: the form s
   local guard = sentinel()
   local id = tostring(tonumber(guard) + 1)
   newer(alice, id, guard) -- the run-counter stays at the sentinel: the form's start gets run id
-  wait('the sentinel retired', function() return W.run(guard) == nil end, 150)
+  wait('the sentinel retired', function() return W.run(guard) == nil end, 40)
   local a = app('ret-app-wait', {sessions = {c.s}})
   local before = session_count()
   local key = submit(c, 'ret-wait')
@@ -170,8 +170,8 @@ test('a run is not retired while its Start form waits for the switch: the form s
   expect(op.result.run_id).to_be(id)
   expect(#a:calls()).to_be(1)
   expect(session_count()).to_be(before + 1)
-  -- The retirement comes after the switch decision (the step waits RETRY_DELAY, 60 s).
-  wait('run ' .. id .. ' retired', function() return W.run(id) == nil end, 150)
+  -- The retirement comes after the switch decision (the step waits retry_delay: 5 s in tests).
+  wait('run ' .. id .. ' retired', function() return W.run(id) == nil end, 40)
   expect(W.run_key(W.start_key('ret-wait')).run_id).to_be(id)
   expect(operation(key).result.run_id).to_be(id)
   expect(#a:calls()).to_be(1)
@@ -206,7 +206,7 @@ test('one tab: a run is not retired before its Start form\'s switch; the form su
   expect(op.result.run_id).to_be(id)
   expect(#a:calls() <= 1).to_be(true)
   expect(session_count()).to_be(before + 1)
-  wait('run ' .. id .. ' retired', function() return W.run(id) == nil end, 150)
+  wait('run ' .. id .. ' retired', function() return W.run(id) == nil end, 40)
   expect(operation(key).result.run_id).to_be(id)
   expect(session_count()).to_be(before + 1)
   a:close()
@@ -244,8 +244,9 @@ test('a form operation after a hub restart, with its run retired: the same run I
 end)
 
 -- An abandoned form: a finished user start into a new session, with no switch decision and no
--- form that polls. Its retirement waits until switch_wait + 60 s after the submit; the step's own
--- timer runs it. A normal start is not blocked meanwhile.
+-- form that polls. Its retirement waits until switch_wait + switch_grace after the submit (3 + 20 s
+-- in tests, lazyrex.json); the step's own timer runs it (retry_delay, 5 s in tests). A normal
+-- start is not blocked meanwhile.
 test('an abandoned form: its run is retired after the bound, without another wake; starts go on', function()
   local alice = agent('alice')
   local name, root = template(alice)
@@ -259,12 +260,12 @@ test('an abandoned form: its run is retired after the bound, without another wak
   W.put_form(op_key, {fingerprint = 'abandoned', request = request, at = os.time()})
   newer(alice, id)
   -- The sentinel is older: the step of the abandoned run comes next, at once.
-  wait('the sentinel retired', function() return W.run(guard) == nil end, 150)
+  wait('the sentinel retired', function() return W.run(guard) == nil end, 40)
   rex.sleep(1)
   expect(W.run(id)).not_to_be(nil)
   local r = alice:call('templates.start', {template = name, root = root, key = 'ret-abandon-other'})
   W.wait_run(alice, r.run_id, 'open')
   expect(W.run(id)).not_to_be(nil)
-  wait('run ' .. id .. ' retired', function() return W.run(id) == nil end, 200)
+  wait('run ' .. id .. ' retired', function() return W.run(id) == nil end, 60)
   expect(W.run_key(op_key).run_id).to_be(id)
 end)

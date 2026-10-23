@@ -156,7 +156,9 @@ a controlled clock and timers) and `retention.lua` (through the plugin).
   `attempted` switch row waits for that bound. Agent starts and starts into an
   existing session never switch. A step that must wait is tried again 60 s later, by its timer
   (`switch_settled` in `templates_run.lua`; the plugin gives it as the engine option `retirable`).
-  So retirement is eventual: after the bound, and then at the next try.
+  So retirement is eventual: after the bound, and then at the next try. The tests set shorter
+  times with plugin args (`lazyrex.json`): `switch_grace` (the 60 s of the bound) 20 s and
+  `retry_delay` (the 60 s of the next try) 5 s, so `tests/retention.lua` fits the file time limit.
 - **Replay.** An agent replay of a retired key within 30 days: `expired` (same arguments) or
   `operation_conflict` (other arguments).
   A Start form operation that runs again after its run was retired (a late poll, or the operation

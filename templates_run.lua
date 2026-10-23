@@ -118,7 +118,8 @@ local function owes_grant_check(run) return finished(run) and by_agent(run) and 
 -- owes no revoke, and is a user run or has a recorded grant (an agent run without one is the
 -- evidence that find_grant uses). A run is retired when at least KEEP newer eligible runs exist.
 -- opts.retirable can postpone a retirement (the plugin waits for a Start form's switch decision:
--- switch_settled); the step is tried again RETRY_DELAY seconds later, so retirement is eventual.
+-- switch_settled); the step is tried again RETRY_DELAY seconds later (opts.retry_delay), so
+-- retirement is eventual.
 -- Newer runs get higher IDs and only older runs are retired, so the rank of a run only grows.
 -- Retirement replaces the run key with a marker {run_id, expired_at, form_rev} and deletes the run
 -- and its switch row, in one transaction that reads them again. The start form stays: Templates
@@ -169,6 +170,9 @@ function M.new(opts)
   -- "Rex Lua runtime"): no closure writes a captured local where a pcall can catch.
   local scan = {active = false, after = nil}
   local now, after = opts.now or os.time, opts.after or rex.after
+  -- retry_delay: the wait before a postponed or failed maintenance step runs again (tests pass a
+  -- shorter one).
+  local retry_delay = opts.retry_delay or RETRY_DELAY
   -- kept: the eligible run IDs (a set) and their count; ready after the first full scan.
   -- maint: maintenance steps {kind, id | key, expect, due}, the run IDs being retired, the cleanup
   -- scan, and one timer (gen supersedes an older callback: rex.after has no cancel).
@@ -637,7 +641,7 @@ function M.new(opts)
     if run.status == 'queued' or owes_revoke(run) then enqueue(id) end
   end
 
-  -- Maintenance steps (one per tick, after the run work). A failed step waits RETRY_DELAY seconds
+  -- Maintenance steps (one per tick, after the run work). A failed step waits retry_delay seconds
   -- (a timer wakes the pump); it never blocks the run queue.
   -- retire reads the run, its run key, start form and switch in one transaction (no hub call),
   -- and retires the run only if it is still eligible and its key names it (not a marker). Else it
@@ -705,10 +709,10 @@ function M.new(opts)
       local item = table.remove(maint.items, i)
       local ok, result = pcall(step, item)
       if ok and result == 'later' then
-        item.due = t + RETRY_DELAY
+        item.due = t + retry_delay
         queue_step(item)
       elseif not ok then
-        item.due = t + RETRY_DELAY
+        item.due = t + retry_delay
         queue_step(item)
         if opts.log then pcall(opts.log, 'maintenance ' .. item.kind .. ' ' .. tostring(item.id or item.key) .. ': ' .. message(result)) end
       end
@@ -717,7 +721,7 @@ function M.new(opts)
     if maint.cleanup then
       local ok, err = pcall(cleanup_page)
       if not ok then
-        maint.cleanup, maint.cleanup_due = nil, t + RETRY_DELAY
+        maint.cleanup, maint.cleanup_due = nil, t + retry_delay
         schedule(maint.cleanup_due)
         if opts.log then pcall(opts.log, 'maintenance cleanup: ' .. message(err)) end
       end

@@ -640,12 +640,15 @@ local loop = {timer = nil, pump = nil}
 -- form's submit (switch_settled, templates_run.lua). The grace is a policy delay, not proof that
 -- every poll has ended: a later poll gets the retired run's ID (start_core).
 local SWITCH_WAIT = tonumber(rex.args.switch_wait) or 15 -- tests pass a shorter wait
-local SWITCH_GRACE = 60
+-- Tests also pass a shorter grace and maintenance retry delay (retry_delay, templates_run.lua), so
+-- a retirement that waits for the bound fits a test file's time limit.
+local SWITCH_GRACE = tonumber(rex.args.switch_grace) or 60
 local engine = run_module.new({hub = hub, start_tab = start_tab, resolve_root = resolve_root, resolve_dir = resolve_dir,
   find_grant = find_grant, revoke = function(grant_id) hub('hub.grant.revoke', {grant_id = grant_id}) end,
   log = function(line) print('templates: ' .. line) end,
   data = data, transaction = app.db.transaction, wake = function() if loop.pump then loop.pump() end end,
-  retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end})
+  retirable = function(run, form, switch, now) return run_module.switch_settled(run, form, switch, now, SWITCH_WAIT + SWITCH_GRACE) end,
+  retry_delay = tonumber(rex.args.retry_delay)})
 -- start_size measures four references (engine.measure): a user and an agent start, each into a new
 -- and an existing session. The keys are built as op_key builds them, with the longest agent ID
 -- and key of "<" (6 bytes each in JSON). The new session name is the template name (the default).
