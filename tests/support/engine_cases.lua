@@ -1030,10 +1030,7 @@ function tests.measure_reads_and_writes_nothing()
   local before = f.state()
   local batches = f.batches
   local get = f.hub
-  f.hub = function(action, args)
-    assert(action ~= 'hub.store.get' and action ~= 'hub.store.batch' and action ~= 'hub.store.scan', 'measure called ' .. action)
-    return get(action, args)
-  end
+  f.hub = function(action) error('measure called ' .. action) end
   e = f.engine()
   assert(e.measure(request('m-1')) > 0)
   f.hub = get
