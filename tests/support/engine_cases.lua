@@ -28,7 +28,11 @@ local function fixture()
   local function wrote() f.writes = f.writes + 1 end
   local function older(a, b) return #a < #b or #a == #b and a < b end
   local d = {}
-  function d.get_run(id) return copy(f.runs[id]) end
+  -- get_run of a row that is not valid JSON fails with internal, as templates_sql.lua (decode).
+  function d.get_run(id)
+    if f.runs[id] and f.runs[id].invalid then error({code='internal', message='The Templates row runs ' .. id .. ' is not valid JSON'}, 0) end
+    return copy(f.runs[id])
+  end
   function d.insert_run(run) wrote(); f.runs[run.id] = {ver=1, value=copy(run)} end
   function d.update_run(run, ver)
     local r = f.runs[run.id]
@@ -741,6 +745,21 @@ function tests.retention_keeps_the_200_newest_eligible_runs_and_every_unfinished
   local batches = f.batches
   local e2 = f.engine(); e2.resume(); rdrain(e2)
   assert(present(f, 6, 205) == 200 and f.batches == batches, 'nothing more after a restart')
+end
+
+-- A row that is not valid JSON (data.run_summaries: invalid) does not stop retention: the healthy
+-- runs after it retire down to the 200 newest eligible runs, and the row stays as it was.
+function tests.retention_goes_on_past_an_invalid_row()
+  local f = fixture()
+  f.runs['1'] = {ver=1, invalid=true}
+  seed_open(f, 2, 206)
+  local e = f.engine(); e.resume(); rdrain(e)
+  assert(present(f, 2, 6) == 0, 'the 5 oldest healthy runs are retired')
+  assert(present(f, 7, 206) == 200, 'the 200 newest eligible runs stay')
+  assert(f.run_keys['k2'].expired_at == f.now, 'a retired run has its marker')
+  local bad = f.runs['1']
+  assert(bad and bad.invalid and bad.ver == 1 and bad.value == nil, 'the invalid row stays')
+  assert(e.maintenance().kept == 200, 'the kept index has the 200 runs')
 end
 
 function tests.retention_the_201st_eligible_run_retires_the_oldest_without_a_wake()
