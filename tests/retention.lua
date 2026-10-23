@@ -87,10 +87,10 @@ test('a retired key is free again 30 days after its removal, also with changed a
   expect(W.run_key(op_key).expired_at).to_be(nil)
 end)
 
--- The UI boundary: the hub saves a completed view operation and answers it without a call to
--- Templates. The plugin's recorded hub calls prove that it did not read the start form (no SQL
--- statement on start_forms; the complete record: no call dropped).
-test('a completed Start form after its run was retired: the hub answers; Templates is not called', function()
+-- The UI boundary: the hub saves a completed view operation and answers its replay. The plugin's
+-- recorded hub calls (the complete record: no call dropped) show no SQL call on start_forms
+-- during the replay and the resubmit.
+test('a completed Start form after its run was retired: the hub answers; no start_forms SQL call during the replay', function()
   local alice = agent('alice')
   local name, root = template(alice)
   local s = W.workspace()
