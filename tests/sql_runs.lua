@@ -6,6 +6,16 @@
 local W = load_fixture(H.args.file:match('^(.*)/') .. '/support/workspace.lua')
 local function part(s) return #s .. ':' .. s end
 local function rows(sql_text, params) return #sql(sql_text, params) end
+-- settled waits until an agent run is open and its grant is revoked: the revoke save is the last
+-- write of the run. A test ends here, so a later injection (sql_commit_writes = 'runs') cannot meet
+-- that save, and a read of the run does not overlap it. The wait is one statement: one snapshot
+-- (W.run reads the value in parts, each part on its own snapshot).
+local function settled(a, id)
+  W.wait_run(a, id, 'open')
+  wait('the revoke of the grant', function()
+    return rows("SELECT id FROM runs WHERE id = ? AND value ->> '$.grant_revoked' = 1", {id}) == 1
+  end, 20)
+end
 local function saved(a, name)
   local s, root = W.workspace()
   W.capture(a, s)
@@ -29,7 +39,7 @@ test('admission: a lost commit reply replays the same run; the counter moves onc
   expect(W.counter()).to_be(id)
   expect(rows("SELECT id FROM runs WHERE value ->> '$.request.key' = ?", {key})).to_be(1)
   expect(rows('SELECT key FROM start_forms WHERE key = ?', {key})).to_be(1)
-  W.wait_run(alice, id, 'open')
+  settled(alice, id)
 end)
 
 -- A commit that the hub refuses (here tx_expired, as after the 10 s transaction limit; the test
@@ -50,7 +60,7 @@ test('admission: a refused commit leaves no form, key, counter or run; a retry a
   expect(rows("SELECT id FROM runs WHERE value ->> '$.request.key' = ?", {key})).to_be(0)
   local r = alice:call('templates.start', args)
   expect(r.run_id).to_be(tostring((tonumber(before) or 0) + 1))
-  W.wait_run(alice, r.run_id, 'open')
+  settled(alice, r.run_id)
 end)
 
 -- An agent run that waits for its grant (authorizing): the engine only looks for the grant, so
@@ -89,7 +99,7 @@ test('a run over the frame limit as a parameter opens; each save is a chunked up
   W.put_template(W.hex('sr-chunk'), {v = 1, name = 'sr-chunk', saved_by = 'alice',
     tabs = {{title = 'chunk', layout = layout}}})
   local r = alice:call('templates.start', {template = 'sr-chunk', root = root, key = 'sr-chunk'})
-  W.wait_run(alice, r.run_id, 'open')
+  settled(alice, r.run_id)
   local run = W.run(r.run_id)
   expect(#rex.json.encode(rex.json.encode(run.value)) > 60 * 1024).to_be(true)
   expect(#rex.json.encode(run.value) <= 61 * 1024).to_be(true)
