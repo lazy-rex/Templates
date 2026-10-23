@@ -70,7 +70,7 @@ test('delete: an agent deletes any template, also one that another agent saved',
   -- A replay after alice saved the name again answers the same and keeps the new template.
   alice:call('templates.save', {name = 'd-alice', root = root, session_id = s, key = 'd3'})
   expect(bob:call('templates.delete', {template = 'd-alice', key = 'del-1'})).to_equal({})
-  expect(find(alice:call('templates.list', {}).templates, 'name', 'd-alice').saved_by).to_be('alice')
+  expect(find(alice:call('templates.list', {}).templates, 'name', 'd-alice').saved_by).to_be(alice.id)
   expect(alice:call('templates.delete', {template = 'd-alice', key = 'del-2'})).to_equal({})
   -- A template that the user saved (and one from before saved_by) is an agent's to delete too.
   W.put_template(W.hex('d-user'), {v = 1, name = 'd-user', saved_by = 'user', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
