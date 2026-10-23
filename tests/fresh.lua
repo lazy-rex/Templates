@@ -42,10 +42,10 @@ test('after a hub restart the counter continues: it is not set again', function(
 end)
 
 
--- A rollback to a release with the import (59b40b5) skips the import only while its markers in
--- meta ('import', 'import/...') stay. On a database at version 2 (as live), a start keeps them
--- and meta 'rev', and the schema stays at version 2.
-test('a start keeps the import markers of a live database; the schema stays at version 2', function()
+-- Schema step 3 deletes the import markers in meta ('import', 'import/...'). Other meta rows stay.
+-- After this step, a rollback to a release with the import (59b40b5) imports again: this step
+-- lands only after the 4.2 release is live (coordinator plan for 4.3).
+test('a start of a database at version 2 deletes the import markers and keeps meta rev', function()
   local counter = rev()
   for _, k in ipairs({'import', 'import/template-done', 'import/floor-2', 'import/counter-done'}) do
     W.sql_write('INSERT INTO meta (k, v) VALUES (?, ?)', {k, k == 'import' and 'done' or '1'})
@@ -53,7 +53,7 @@ test('a start keeps the import markers of a live database; the schema stays at v
   W.sql_write('PRAGMA user_version = 2') -- the live schema
   hub:restart()
   agent('alice'):call('templates.list', {})
-  expect(sql("SELECT count(*) AS n FROM meta WHERE k = 'import' OR k LIKE 'import/%'")[1].n).to_be(4)
-  expect(sql('PRAGMA user_version')[1].user_version).to_be(2)
+  expect(sql("SELECT count(*) AS n FROM meta WHERE k = 'import' OR k LIKE 'import/%'")[1].n).to_be(0)
+  expect(sql('PRAGMA user_version')[1].user_version).to_be(3)
   expect(rev()).to_be(counter)
 end)
