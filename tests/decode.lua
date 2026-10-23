@@ -39,7 +39,7 @@ test('a start form request that is not valid JSON: a retry of the start fails wi
   local args = {template = 'dec-op', root = T.save.root, key = 'dec-form'}
   local r = alice:call('templates.start', args)
   W.wait_run(alice, r.run_id, 'open')
-  local key = W.agent_start_key('alice', 'dec-form')
+  local key = W.agent_start_key(alice.id, 'dec-form')
   expect(#sql('SELECT key FROM start_forms WHERE key = ?', {key})).to_be(1)
   W.sql_write('UPDATE start_forms SET request = ? WHERE key = ?', {BAD, key})
   local err = failure(function() return alice:call('templates.start', args) end)
@@ -69,10 +69,11 @@ end)
 -- The run scan skips a run row that is not valid JSON and does not change it: a person decides what
 -- to do with it (coordinator ruling, 2026-10-22). The good run sorts after the bad row.
 test('a run row that is not valid JSON: after a restart the scan resumes the run after it and keeps the row', function()
+  local alice = agent('alice')
   local bad, good = '8000', '9002'
-  local key = 'start/agent/' .. W.part('alice') .. W.part('dec-scan')
+  local key = 'start/agent/' .. W.part(alice.id) .. W.part('dec-scan')
   W.put_runs({{id = good, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
-    session_key = 'templates/' .. good .. '/session', request = {key = key, by = 'alice', root = '/', new_session_name = 'dec',
+    session_key = 'templates/' .. good .. '/session', request = {key = key, by = alice.id, root = '/', new_session_name = 'dec',
     template = {v = 1, name = 'dec', tabs = {}}}}})
   W.put_run_key(key, {run_id = good})
   W.sql_write("INSERT INTO runs (id, ver, status, value) VALUES (?, 1, 'open', ?)", {bad, BAD})

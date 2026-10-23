@@ -30,7 +30,7 @@ test('a save with 2600 pane choices replays an operation saved with the same can
   entries[#entries + 1] = '}'
   local fingerprint = 'save-agent-v1/{' .. part('name') .. 's' .. part('cc') .. part('panes') .. join(entries)
     .. part('root') .. 's' .. part('/cc-root') .. part('session_id') .. 's' .. part('cc-s') .. '}'
-  W.put_op({key = 'save/agent/' .. part('alice') .. part('cc-1'), fingerprint = fingerprint, result = {name = 'cc'}})
+  W.put_op({key = 'save/agent/' .. part(alice.id) .. part('cc-1'), fingerprint = fingerprint, result = {name = 'cc'}})
   local args = {name = 'cc', root = '/cc-root', session_id = 'cc-s', panes = panes, key = 'cc-1'}
   expect(#rex.json.encode(args) < 60 * 1024).to_be(true)
   expect(alice:call('templates.save', args)).to_equal({name = 'cc'})

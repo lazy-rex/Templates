@@ -58,10 +58,10 @@ test('an agent replay of a retired start gives expired; changed arguments give o
   W.wait_run(alice, r.run_id, 'open')
   wait('the grant revoked', function() return W.run(r.run_id).value.grant_revoked end, 20)
   retire(alice, r.run_id)
-  local op_key = W.agent_start_key('alice', 'ret-a1')
+  local op_key = W.agent_start_key(alice.id, 'ret-a1')
   local marker = W.run_key(op_key)
   expect(marker.run_id).to_be(r.run_id)
-  expect(marker.form_rev).to_be(W.form(W.agent_start_key('alice', 'ret-a1')).rev)
+  expect(marker.form_rev).to_be(W.form(W.agent_start_key(alice.id, 'ret-a1')).rev)
   local next_id = W.next_run_id()
   expect_error(function() alice:call('templates.start', {template = name, root = root, key = 'ret-a1'}) end, 'expired')
   expect_error(function() alice:call('templates.start', {template = name, root = root .. '/api', key = 'ret-a1'}) end, 'operation_conflict')
@@ -72,12 +72,12 @@ end)
 test('a retired key is free again 30 days after its removal, also with changed arguments', function()
   local alice = agent('alice')
   local name, root = template(alice)
-  local op_key = W.agent_start_key('alice', 'ret-a1')
+  local op_key = W.agent_start_key(alice.id, 'ret-a1')
   age(op_key, TTL - 3)
   expect_error(function() alice:call('templates.start', {template = name, root = root, key = 'ret-a1'}) end, 'operation_conflict')
   local old = W.run_key(op_key).run_id
   -- The same arguments as the first start (template ret-1 still exists).
-  local first = W.form(W.agent_start_key('alice', 'ret-a1')).request
+  local first = W.form(W.agent_start_key(alice.id, 'ret-a1')).request
   expect_error(function() alice:call('templates.start', {template = first.template.name, root = first.root, key = 'ret-a1'}) end, 'expired')
   rex.sleep(4)
   -- Changed arguments after the expiry: a new start.

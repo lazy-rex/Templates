@@ -16,7 +16,7 @@ test('an agent saves a session; a retry replays; other content with the key is a
   expect_error(function() alice:call('templates.save', {name = 'ws-other', root = root, session_id = s, key = 'save-1'}) end, 'operation_conflict')
   expect(find(alice:call('templates.list', {}).templates, 'name', 'ws-agent').tabs).to_be(2)
   local t = alice:call('templates.get', {template = 'ws-agent'}).template
-  expect(t.saved_by).to_be('alice')
+  expect(t.saved_by).to_be(alice.id)
   expect(#t.tabs).to_be(2)
   expect(t.tabs[1].layout.direction).to_be('horizontal')
   -- A pane choice of skip leaves the pane out.
@@ -52,11 +52,11 @@ test('agent and UI keys are separate: two agents and a crafted UI key use one ke
   local form = user:view('/forms/save', nil, s)
   local values = form_input(form:render(), 'save_template')
   values.name, values.root = 'k-user', root
-  expect(form:action('save_template', 'submit', {values = values}, 'agent/5:alice6:shared').status).to_be('succeeded')
+  expect(form:action('save_template', 'submit', {values = values}, 'agent/' .. W.part(alice.id) .. W.part('shared')).status).to_be('succeeded')
   local names = {}
   for _, t in ipairs(alice:call('templates.list', {}).templates) do names[t.name] = t.saved_by end
-  expect(names['k-alice']).to_be('alice')
-  expect(names['k-bob']).to_be('bob')
+  expect(names['k-alice']).to_be(alice.id)
+  expect(names['k-bob']).to_be(bob.id)
   expect(names['k-user']).to_be('user')
 end)
 
@@ -101,11 +101,11 @@ test('an agent start opens its tabs as the agent, with a grant; a retry gives th
   expect(alice:call('templates.start', {template = 'st-agent', root = root, new_session = 'st agent', key = 'st-1'})).to_equal(r)
   expect_error(function() alice:call('templates.start', {template = 'st-agent', root = root, key = 'st-1'}) end, 'operation_conflict')
   local run = wait_run(alice, r.run_id, 'open')
-  expect(run.by).to_be('alice')
+  expect(run.by).to_be(alice.id)
   -- Both tabs are the agent's windows.
   local mine = 0
   for _, w in ipairs(alice:hub('hub.workers', {}).workers) do
-    if w.session_id == run.session_id and w.parent == 'alice' then mine = mine + 1 end
+    if w.session_id == run.session_id and w.parent == alice.id then mine = mine + 1 end
   end
   expect(mine >= 2).to_be(true)
   local g = W.run(r.run_id).value
@@ -147,7 +147,7 @@ test('dismiss and retry: an agent acts on another agent\'s run; the run stays th
   expect(retried).to_equal({run_id = a.run_id, woken = true})
   expect(bob:call('templates.retry', {run_id = a.run_id, key = 'r1'})).to_equal(retried)
   -- The run stays alice's, with her grant.
-  expect(W.run(a.run_id).value.request.by).to_be('alice')
+  expect(W.run(a.run_id).value.request.by).to_be(alice.id)
   expect(W.run(a.run_id).value.grant_id).to_be(grant_id)
   -- The retry queued the run; it blocks again (the session does not exist).
   wait_run(alice, a.run_id, 'blocked')
@@ -188,8 +188,8 @@ end)
 
 -- A template that alice saved, started into a session that
 -- does not exist, so its first tab blocks.
-local function seed_blocked()
-  W.put_template('726576696577', {v = 1, name = 'review', saved_by = 'alice',
+local function seed_blocked(by)
+  W.put_template('726576696577', {v = 1, name = 'review', saved_by = by,
     tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
 end
 local function blocked_args(key)
@@ -197,8 +197,8 @@ local function blocked_args(key)
 end
 
 test('a retry whose reply was lost: the replay recovers the queued run and retries nothing twice', function()
-  seed_blocked()
   local a = agent('alice')
+  seed_blocked(a.id)
   local r = a:call('templates.start', blocked_args('retry-start'))
   wait('blocked', function() return W.run(r.run_id).value.status == 'blocked' end)
   rex.sleep(1)

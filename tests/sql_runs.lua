@@ -27,7 +27,7 @@ test('admission: a lost commit reply replays the same run; the counter moves onc
   local alice = agent('alice')
   local root = saved(alice, 'sr-lost')
   local before = W.counter()
-  local key = 'start/agent/' .. part('alice') .. part('sr-lost')
+  local key = 'start/agent/' .. part(alice.id) .. part('sr-lost')
   local inj = inject({match = {sql_commit_writes = 'runs'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
   local args = {template = 'sr-lost', root = root, key = 'sr-lost'}
   expect_error(function() alice:call('templates.start', args) end, 'unavailable')
@@ -49,7 +49,7 @@ test('admission: a refused commit leaves no form, key, counter or run; a retry a
   local alice = agent('alice')
   local root = saved(alice, 'sr-refused')
   local before = W.counter()
-  local key = 'start/agent/' .. part('alice') .. part('sr-refused')
+  local key = 'start/agent/' .. part(alice.id) .. part('sr-refused')
   local inj = inject({match = {sql_commit_writes = 'runs'}, fail = 'transaction ended by the test', fail_code = 'tx_expired'})
   local args = {template = 'sr-refused', root = root, key = 'sr-refused'}
   expect_error(function() alice:call('templates.start', args) end, 'tx_expired')
@@ -68,9 +68,9 @@ end)
 test('dismiss: a lost commit reply replays its saved reply; one operation, one dismissed run', function()
   local alice = agent('alice')
   local id = '9001'
-  local key = 'start/agent/' .. part('alice') .. part('sr-dismiss')
+  local key = 'start/agent/' .. part(alice.id) .. part('sr-dismiss')
   W.put_runs({{id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
-    session_key = 'templates/' .. id .. '/session', request = {key = key, by = 'alice', root = '/', new_session_name = 'sr',
+    session_key = 'templates/' .. id .. '/session', request = {key = key, by = alice.id, root = '/', new_session_name = 'sr',
     template = {v = 1, name = 'sr', tabs = {}}}}})
   W.put_run_key(key, {run_id = id})
   local inj = inject({match = {sql_commit_writes = 'ops'}, fail = 'reply lost by the test', fail_code = 'unavailable', after = true})
@@ -79,7 +79,7 @@ test('dismiss: a lost commit reply replays its saved reply; one operation, one d
   expect(injection(inj).consumed).to_be(1)
   expect(W.run(id).value.status).to_be('dismissed')
   expect(alice:call('templates.dismiss', args)).to_equal({run_id = id, status = 'dismissed'})
-  expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part('alice') .. part('sr-dismiss')})).to_be(1)
+  expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part(alice.id) .. part('sr-dismiss')})).to_be(1)
   expect(W.run(id).value.dismissed_from).to_be('authorizing')
 end)
 
@@ -96,7 +96,7 @@ test('a run over the frame limit as a parameter opens; each save is a chunked up
   local function leaf() return {launch = {shell = true}, dir = '.'} end
   local layout = leaf()
   for _ = 1, 4 do layout = {direction = 'horizontal', ratio = 0.5, before = leaf(), after = layout} end
-  W.put_template(W.hex('sr-chunk'), {v = 1, name = 'sr-chunk', saved_by = 'alice',
+  W.put_template(W.hex('sr-chunk'), {v = 1, name = 'sr-chunk', saved_by = alice.id,
     tabs = {{title = 'chunk', layout = layout}}})
   local r = alice:call('templates.start', {template = 'sr-chunk', root = root, key = 'sr-chunk'})
   settled(alice, r.run_id)
@@ -112,10 +112,10 @@ end)
 -- ("<" is 7 bytes there), so a dismiss writes it in 2 chunks. A fault fails a call by its number
 -- only, so a probe dismiss of an equal run gives the number of the first append; the test then
 -- checks that the fault failed that statement.
-local function big_authorizing(id, name)
-  local key = 'start/agent/' .. part('alice') .. part(name)
+local function big_authorizing(a, id, name)
+  local key = 'start/agent/' .. part(a.id) .. part(name)
   W.put_runs({{id = id, status = 'authorizing', next_tab = 1, root = '/', tabs = {}, results = {},
-    pad = string.rep('<', 9000), session_key = 'templates/' .. id .. '/session', request = {key = key, by = 'alice', root = '/',
+    pad = string.rep('<', 9000), session_key = 'templates/' .. id .. '/session', request = {key = key, by = a.id, root = '/',
     new_session_name = 'sr', template = {v = 1, name = 'sr', tabs = {}}}}})
   W.put_run_key(key, {run_id = id})
 end
@@ -124,8 +124,8 @@ local function is_append(c) return c.args.sql:match('^UPDATE runs SET value = va
 
 test('a failed append in a chunked run update commits nothing; the run keeps its value, ver and status', function()
   local alice = agent('alice')
-  big_authorizing('9101', 'sr-probe')
-  big_authorizing('9102', 'sr-append')
+  big_authorizing(alice, '9101', 'sr-probe')
+  big_authorizing(alice, '9102', 'sr-append')
   local _, base = calls('none')
   alice:call('templates.dismiss', {run_id = '9101', key = 'sr-probe'})
   local nth
@@ -143,7 +143,7 @@ test('a failed append in a chunked run update commits nothing; the run keeps its
   expect(is_append(execs[nth])).to_be(true)
   expect(execs[nth - 1].args.sql).to_match('^UPDATE runs SET ver = ver %+ 1')
   expect(run_row('9102')).to_equal(before)
-  expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part('alice') .. part('sr-append')})).to_be(0)
+  expect(rows('SELECT key FROM ops WHERE key = ?', {'dismiss/agent/' .. part(alice.id) .. part('sr-append')})).to_be(0)
   expect(alice:call('templates.dismiss', {run_id = '9102', key = 'sr-append'})).to_equal({run_id = '9102', status = 'dismissed'})
   local after = run_row('9102')
   expect(after.ver).to_be(before.ver + 1)

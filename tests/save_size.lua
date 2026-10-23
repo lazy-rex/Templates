@@ -148,7 +148,7 @@ test('just under the save limit: it starts at its root; a longer root or name is
   expect(W.counter()).to_be(counter)
   expect(sessions()).to_be(before)
   -- The start form commits only with an admission: a refused start leaves none.
-  expect(W.form(W.agent_start_key('alice', 'size-edge-long'))).to_be(nil)
+  expect(W.form(W.agent_start_key(alice.id, 'size-edge-long'))).to_be(nil)
   -- (c) A longer encoded session name than the template name, at R (user path).
   local name = string.rep('<', 1000)
   expect(lower(t, R, name) > Run.MAX_RUN).to_be(true)

@@ -54,7 +54,7 @@ test('agent: templates.get gives rev; save with replace = rev replaces exactly t
   expect(bob:call('templates.save', {name = 'rp-a', root = root, session_id = s, replace = got.rev, key = 'rp-a-rep'})).to_equal({name = 'rp-a'})
   local again = alice:call('templates.get', {template = 'rp-a'})
   expect(titles(again.template)).to_equal({'solo'})
-  expect(again.template.saved_by).to_be('bob')
+  expect(again.template.saved_by).to_be(bob.id)
   expect(again.rev ~= got.rev).to_be(true)
 end)
 
@@ -125,7 +125,7 @@ end)
 test('a save operation without replace replays unchanged (agent and form)', function()
   local alice = agent('alice')
   -- Agent: save-agent-v1/ + canon{name, panes, root, session_id}, without replace.
-  W.put_op({key = 'save/agent/' .. part('alice') .. part('rp-old-agent'),
+  W.put_op({key = 'save/agent/' .. part(alice.id) .. part('rp-old-agent'),
     fingerprint = 'save-agent-v1/{4:names6:rp-old5:panes{}4:roots9:/old-root10:session_ids5:old-s}',
     result = {name = 'rp-old'}})
   expect(alice:call('templates.save', {name = 'rp-old', root = '/old-root', session_id = 'old-s', key = 'rp-old-agent'})).to_equal({name = 'rp-old'})

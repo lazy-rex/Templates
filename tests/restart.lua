@@ -151,7 +151,7 @@ test('an agent start returns before its tabs; after a hub restart they open as t
   local run = W.wait_run(alice, id, 'open')
   local panes = workers_in(alice, run.session_id)
   expect(#panes).to_be(3)
-  for _, w in ipairs(panes) do expect(w.parent).to_be('alice') end
+  for _, w in ipairs(panes) do expect(w.parent).to_be(alice.id) end
   -- Any agent stops a pane (decision "Agents may act on anything", 2026-10-19); the pane stays alice's.
   expect(bob:hub('hub.stop', {spawn_id = panes[1].spawn_id}).status).to_be('closed')
   expect(alice:hub('hub.stop', {spawn_id = panes[2].spawn_id}).status).to_be('closed')

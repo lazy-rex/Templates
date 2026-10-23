@@ -3,10 +3,6 @@
  "sdk": "0",
  "main": "templates.lua",
  "test": {
-  "agents": [
-   {"id": "alice", "name": "Alice"},
-   {"id": "bob", "name": "Bob"}
-  ],
   "args": {"templates": {"switch_wait": "3"}},
   "profiles": "tests/profiles.json"
  }

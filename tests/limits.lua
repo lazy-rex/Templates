@@ -125,7 +125,7 @@ end)
 -- start replays with it, and another start with it conflicts.
 test('a key of 200 "<" still starts and replays', function()
   local a = agent('alice')
-  W.put_template(W.hex('lt-key'), {v = 1, name = 'lt-key', saved_by = 'alice',
+  W.put_template(W.hex('lt-key'), {v = 1, name = 'lt-key', saved_by = a.id,
     tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
   local key, root = string.rep('<', 200), W.real(W.HOME)
   local first = a:call('templates.start', {template = 'lt-key', root = root, key = key})
@@ -139,7 +139,7 @@ end)
 test('a long refusal from the hub is stored bounded; the run blocks and can be dismissed', function()
   local a = agent('alice')
   local name = 'long-profile'
-  W.put_template(W.hex(name), {v = 1, name = name, saved_by = 'alice',
+  W.put_template(W.hex(name), {v = 1, name = name, saved_by = a.id,
     tabs = {{title = 'one', layout = {launch = {profile = string.rep('z', 18000)}, dir = '.'}}}})
   local r = a:call('templates.start', {template = name, root = W.real(W.HOME), key = 'long-profile'})
   local run = W.wait_run(a, r.run_id, 'blocked')
@@ -157,7 +157,7 @@ end)
 -- the bound is refused before anything is written.
 test('an oversized input session ID is refused before the start is written', function()
   local a = agent('alice')
-  W.put_template('6964', {v = 1, name = 'id', saved_by = 'alice', tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
+  W.put_template('6964', {v = 1, name = 'id', saved_by = a.id, tabs = {{title = 'one', layout = {launch = {shell = true}, dir = '.'}}}})
   local before = W.next_run_id()
   expect_error(function()
     a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = string.rep('s', 25000), key = 'long-session'})
@@ -166,7 +166,7 @@ test('an oversized input session ID is refused before the start is written', fun
     a:call('templates.start', {template = 'id', root = W.real(W.HOME), session_id = 'session:"quoted"', key = 'odd-session'})
   end, 'invalid_input')
   expect(W.next_run_id()).to_be(before)
-  expect(W.form(W.agent_start_key('alice', 'long-session'))).to_be(nil)
+  expect(W.form(W.agent_start_key(a.id, 'long-session'))).to_be(nil)
 end)
 
 test('a key with a control character is refused', function()
