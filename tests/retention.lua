@@ -87,38 +87,6 @@ test('a retired key is free again 30 days after its removal, also with changed a
   expect(W.run_key(op_key).expired_at).to_be(nil)
 end)
 
--- An agent that took over a legacy ID (alice reports a conversation: her identity changes, and
--- "alice" is her legacy ID). Her keys are looked up under both IDs.
-test('the alias lookup: expired aliases start again; an expired alias does not hide an active start; a renamed agent gets expired', function()
-  local alice = agent('alice')
-  local name, root = template(alice)
-  -- A start under the ID "alice", retired before the rename.
-  local r = alice:call('templates.start', {template = name, root = root, key = 'ret-alias-old'})
-  W.wait_run(alice, r.run_id, 'open')
-  wait('the grant revoked', function() return W.run(r.run_id).value.grant_revoked end, 20)
-  retire(alice, r.run_id)
-  local current = alice:report({kind = 'claude', conversation_id = 'retention-alias'}).identity
-  expect(current).not_to_be('alice')
-  -- Replay through the renamed agent within 30 days: expired.
-  expect_error(function() alice:call('templates.start', {template = name, root = root, key = 'ret-alias-old'}) end, 'expired')
-  -- Two expired alias records of one key (one per ID): a new start, not a conflict.
-  local fp
-  for _, id in ipairs({'alice', current}) do
-    local k = W.agent_start_key(id, 'ret-alias-two')
-    local rev = W.put_form(k, {fingerprint = 'old-' .. id, request = {key = k}, at = 1})
-    W.put_run_key(k, {run_id = '1', expired_at = os.time() - TTL - 1, form_rev = rev})
-  end
-  local two = alice:call('templates.start', {template = name, root = root, key = 'ret-alias-two'})
-  W.wait_run(alice, two.run_id, 'open')
-  -- An active start under the current ID, and an expired record of the same key under "alice":
-  -- the replay gives the active run.
-  local active = alice:call('templates.start', {template = name, root = root, key = 'ret-alias-active'})
-  local k = W.agent_start_key('alice', 'ret-alias-active')
-  local rev = W.put_form(k, {fingerprint = 'old', request = {key = k}, at = 1})
-  W.put_run_key(k, {run_id = '1', expired_at = os.time() - TTL - 1, form_rev = rev})
-  expect(alice:call('templates.start', {template = name, root = root, key = 'ret-alias-active'})).to_equal(active)
-end)
-
 -- The UI boundary: the hub saves a completed view operation and answers it without a call to
 -- Templates. A read hook on the start's start-form record proves that the plugin did not read it.
 test('a completed Start form after its run was retired: the hub answers; Templates is not called', function()

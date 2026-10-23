@@ -122,9 +122,12 @@ not record. The plugin's `find_grant` accepts a grant only when all of these are
 
 `find_grant` does not compare the grant's agent with `request.by`. After an identity migration,
 `request.by` can keep a legacy ID while the grant belongs to the current identity of the same
-agent (coordinator decision, 2026-10-19). `tests/restart.lua` "constructed boundary" covers this
-case. A finished agent run without a recorded grant is checked once per engine: a grant that it
-finds is recorded and then revoked. Nothing dispatches.
+agent (coordinator decision, 2026-10-19). No lab test covers this case: identity mode cannot
+make a legacy alias (coordinator ruling for identity step c(2)). `tests/restart.lua`
+"constructed boundary" covers the resume of a run with no recorded grant, with `request.by`
+equal to the grant's agent.
+A finished agent run without a recorded grant is checked once per engine: a grant that it finds
+is recorded and then revoked. Nothing dispatches.
 
 Revoke. When an agent's run is finished (open, failed, closed or dismissed) and has a grant, the
 engine revokes the grant after the final state commits, and records `grant_revoked`. A failed
