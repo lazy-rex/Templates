@@ -115,9 +115,12 @@ Plugin args (hub config `plugins[].args`):
 
 ## Limits
 
-A plugin reply over 64 KiB never arrives (LazyRex
-[Rex Lua runtime](https://github.com/lazy-rex/LazyRex/blob/main/docs/rex-protocol.md#rex-lua-runtime-rex-do)). These
-views and agent outputs have a size limit:
+One Rex control message is at most 64 KiB (LazyRex
+[Rex Lua runtime](https://github.com/lazy-rex/LazyRex/blob/main/docs/rex-protocol.md#rex-lua-runtime-rex-do)).
+That limit applies to each request that the plugin sends. A reply to the hub can be larger: the
+SDK sends a reply over `inline_max` (45056 bytes) in parts, up to `max_total` (786432 bytes)
+(LazyRex [Reply parts](https://github.com/lazy-rex/LazyRex/blob/main/docs/hub.md#reply-parts)). Templates keeps its own size limits for
+these views and agent outputs:
 
 - A template name is at most 60 bytes.
 - The panel and the Start form are at most 48 KiB each. The panel keeps the switch notice first,
